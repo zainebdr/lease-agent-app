@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lease &amp; Property Issue Agent</title>
+<style>
+  :root {
+    --bg: #f7f7f8;
+    --panel: #ffffff;
+    --border: #e2e2e6;
+    --text: #1c1c1f;
+    --muted: #6b6b74;
+    --accent: #2f5fda;
+    --accent-hover: #24449e;
+    --ok: #1a7f37;
+    --ok-bg: #e6f6ea;
+    --fail: #c22b2b;
+    --fail-bg: #fbe9e9;
+    --warn: #8a6d00;
+    --warn-bg: #fbf3d6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  nav { display: flex; gap: 8px; }
+  nav button {
+    background: none;
+    border: 1px solid transparent;
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--muted);
+  }
+  nav button.active { background: var(--accent); color: #fff; }
+  nav button:not(.active):hover { background: var(--border); color: var(--text); }
+  main { max-width: 960px; margin: 0 auto; padding: 24px; }
+  .view[hidden] { display: none; }
+  h2 { font-size: 20px; margin: 0 0 16px; }
+  h3 { font-size: 15px; margin: 0 0 8px; }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px 18px;
+    margin-bottom: 16px;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 14px; }
+  th { color: var(--muted); font-weight: 500; }
+  tr.clickable { cursor: pointer; }
+  tr.clickable:hover { background: var(--bg); }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+  }
+  .badge-ok { background: var(--ok-bg); color: var(--ok); }
+  .badge-fail { background: var(--fail-bg); color: var(--fail); }
+  .badge-warn { background: var(--warn-bg); color: var(--warn); }
+  .badge-muted { background: var(--border); color: var(--muted); }
+  .muted { color: var(--muted); }
+  .back-link {
+    background: none; border: none; color: var(--accent); cursor: pointer;
+    font-size: 14px; padding: 0; margin-bottom: 16px; display: inline-block;
+  }
+  .back-link:hover { text-decoration: underline; }
+  .empty-state { color: var(--muted); font-size: 14px; padding: 8px 0; }
+  .field-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .field-row:last-child { border-bottom: none; }
+  .field-name { font-weight: 500; font-size: 13px; color: var(--muted); min-width: 160px; }
+  .field-value { flex: 1; font-size: 14px; }
+  .field-meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .rule-row { display: flex; gap: 10px; align-items: flex-start; padding: 6px 0; font-size: 13px; }
+  .rule-id { font-weight: 600; min-width: 28px; }
+  form.inline { display: flex; flex-direction: column; gap: 10px; max-width: 420px; }
+  input[type="text"], input[type="file"], select {
+    padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px;
+  }
+  button.primary {
+    background: var(--accent); color: #fff; border: none; padding: 8px 16px;
+    border-radius: 6px; cursor: pointer; font-size: 14px;
+  }
+  button.primary:hover { background: var(--accent-hover); }
+  button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  .error-banner {
+    background: var(--fail-bg); color: var(--fail); border-radius: 6px;
+    padding: 10px 12px; font-size: 13px; margin-bottom: 12px;
+  }
+  .photo-thumb { max-width: 140px; max-height: 100px; border-radius: 6px; border: 1px solid var(--border); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Lease &amp; Property Issue Agent</h1>
+  <nav>
+    <button data-view="units-view" class="active">Units</button>
+    <button data-view="upload-lease-view">Upload Lease</button>
+    <button data-view="report-issue-view">Report Issue</button>
+  </nav>
+</header>
+
+<main>
+
+  <section id="units-view" class="view">
+    <h2>Units</h2>
+    <div id="units-error"></div>
+    <div class="card">
+      <table id="units-table">
+        <thead>
+          <tr><th>Unit</th><th>Building</th><th>Type</th><th>Status</th></tr>
+        </thead>
+        <tbody id="units-tbody">
+          <tr><td colspan="4" class="empty-state">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="unit-detail-view" class="view" hidden>
+    <button class="back-link" data-back-to="units-view">&larr; Back to units</button>
+    <h2 id="unit-detail-title"></h2>
+    <div id="unit-detail-error"></div>
+    <div id="unit-detail-content"></div>
+  </section>
+
+  <section id="upload-lease-view" class="view" hidden>
+    <h2>Upload a Lease</h2>
+    <p class="muted">Plain-text lease documents only in this build.</p>
+    <div class="card">
+      <form class="inline" id="upload-lease-form">
+        <input type="file" id="lease-file" accept=".txt" required>
+        <button type="submit" class="primary">Upload &amp; Extract</button>
+      </form>
+    </div>
+    <div id="lease-upload-error"></div>
+    <div id="lease-result"></div>
+  </section>
+
+  <section id="report-issue-view" class="view" hidden>
+    <h2>Report a Property Issue</h2>
+    <p class="muted">Upload one or more photos of the unit; the agent assesses condition and drafts a work order.</p>
+    <div class="card">
+      <form class="inline" id="report-issue-form">
+        <select id="issue-unit-select" required>
+          <option value="">Select a unit…</option>
+        </select>
+        <input type="text" id="issue-reported-by" placeholder="Reported by (optional)">
+        <input type="file" id="issue-files" accept="image/*" multiple required>
+        <button type="submit" class="primary">Upload &amp; Assess</button>
+      </form>
+    </div>
+    <div id="issue-upload-error"></div>
+    <div id="issue-result"></div>
+  </section>
+
+</main>
+
+<script>
+const API_BASE = "http://localhost:8000";
+
+// ---------------------------------------------------------------------
+// View switching - deliberately no router/framework: three sections,
+// toggled by hiding/showing. Enough for three screens; would be the
+// first thing to replace with something real if this grew past that.
+// ---------------------------------------------------------------------
+function showView(id) {
+  document.querySelectorAll(".view").forEach(v => v.hidden = (v.id !== id));
+  document.querySelectorAll("nav button").forEach(b => {
+    b.classList.toggle("active", b.dataset.view === id);
+  });
+}
+
+document.querySelectorAll("nav button[data-view]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    showView(btn.dataset.view);
+    if (btn.dataset.view === "units-view") loadUnits();
+    if (btn.dataset.view === "report-issue-view") populateUnitSelect();
+  });
+});
+
+document.querySelectorAll("[data-back-to]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    showView(btn.dataset.backTo);
+    loadUnits();
+  });
+});
+
+// ---------------------------------------------------------------------
+// Fetch helper - surfaces API errors (FastAPI's {"detail": "..."} shape)
+// as readable text instead of a silent failure or a raw stack trace.
+// ---------------------------------------------------------------------
+async function api(path, opts = {}) {
+  const res = await fetch(`${API_BASE}${path}`, opts);
+  if (!res.ok) {
+    let detail = res.statusText;
+    try {
+      const body = await res.json();
+      detail = body.detail || JSON.stringify(body);
+    } catch (_) { /* response wasn't JSON - keep statusText */ }
+    throw new Error(`${res.status}: ${detail}`);
+  }
+  return res.json();
+}
+
+function showError(containerId, err) {
+  const el = document.getElementById(containerId);
+  el.innerHTML = `<div class="error-banner">${escapeHtml(err.message || String(err))}
+    ${err.message && err.message.includes("Failed to fetch")
+      ? `<br>Is the backend running at ${API_BASE}? (<code>uvicorn app.main:app --reload</code> from the backend/ folder)`
+      : ""}
+    </div>`;
+}
+function clearError(containerId) { document.getElementById(containerId).innerHTML = ""; }
+
+function escapeHtml(str) {
+  const div = document.createElement("div");
+  div.textContent = str ?? "";
+  return div.innerHTML;
+}
+
+// ---------------------------------------------------------------------
+// Badges
+// ---------------------------------------------------------------------
+function statusBadge(status) {
+  const cls = status === "occupied" ? "badge-warn" : "badge-ok";
+  return `<span class="badge ${cls}">${escapeHtml(status)}</span>`;
+}
+function ruleResultBadge(result) {
+  const cls = result === "PASS" ? "badge-ok" : result === "FAIL" ? "badge-fail" : "badge-muted";
+  return `<span class="badge ${cls}">${escapeHtml(result)}</span>`;
+}
+function reviewBadge(state) {
+  const map = { accepted: "badge-ok", edited: "badge-ok", rejected: "badge-fail", pending: "badge-muted" };
+  return `<span class="badge ${map[state] || "badge-muted"}">${escapeHtml(state)}</span>`;
+}
+
+// ---------------------------------------------------------------------
+// Units list
+// ---------------------------------------------------------------------
+async function loadUnits() {
+  clearError("units-error");
+  const tbody = document.getElementById("units-tbody");
+  tbody.innerHTML = `<tr><td colspan="4" class="empty-state">Loading…</td></tr>`;
+  try {
+    const units = await api("/units");
+    if (!units.length) {
+      tbody.innerHTML = `<tr><td colspan="4" class="empty-state">No units found.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = units.map(u => `
+      <tr class="clickable" data-unit-id="${escapeHtml(u.unit_id)}">
+        <td>${escapeHtml(u.label)} <span class="muted">(${escapeHtml(u.unit_id)})</span></td>
+        <td>${escapeHtml(u.building_name)}</td>
+        <td>${escapeHtml(u.type || "-")}</td>
+        <td>${statusBadge(u.status)}</td>
+      </tr>
+    `).join("");
+    tbody.querySelectorAll("tr[data-unit-id]").forEach(row => {
+      row.addEventListener("click", () => openUnitDetail(row.dataset.unitId));
+    });
+  } catch (err) {
+    tbody.innerHTML = "";
+    showError("units-error", err);
+  }
+}
+
+async function populateUnitSelect() {
+  const select = document.getElementById("issue-unit-select");
+  try {
+    const units = await api("/units");
+    select.innerHTML = `<option value="">Select a unit…</option>` +
+      units.map(u => `<option value="${escapeHtml(u.unit_id)}">${escapeHtml(u.label)} (${escapeHtml(u.unit_id)})</option>`).join("");
+  } catch (err) {
+    showError("issue-upload-error", err);
+  }
+}
+
+// ---------------------------------------------------------------------
+// Unit detail - the screen the brief is actually grading: a unit's
+// lease(s) and reported issues, in one place.
+// ---------------------------------------------------------------------
+async function openUnitDetail(unitId) {
+  showView("unit-detail-view");
+  document.getElementById("unit-detail-title").textContent = "Loading…";
+  clearError("unit-detail-error");
+  try {
+    const data = await api(`/units/${encodeURIComponent(unitId)}`);
+    renderUnitDetail(data);
+  } catch (err) {
+    document.getElementById("unit-detail-title").textContent = unitId;
+    showError("unit-detail-error", err);
+  }
+}
+
+function renderUnitDetail(data) {
+  const { unit, leases, issues } = data;
+  document.getElementById("unit-detail-title").innerHTML =
+    `${escapeHtml(unit.label)} <span class="muted">(${escapeHtml(unit.unit_id)})</span> ${statusBadge(unit.status)}`;
+
+  const content = document.getElementById("unit-detail-content");
+  content.innerHTML = `
+    <div class="card">
+      <h3>Unit</h3>
+      <div class="field-row"><span class="field-name">Property</span><span class="field-value">${escapeHtml(unit.property_name)} — ${escapeHtml(unit.building_name)}</span></div>
+      <div class="field-row"><span class="field-name">Type / area</span><span class="field-value">${escapeHtml(unit.type || "-")} · ${unit.area_sqm ?? "-"} sqm</span></div>
+    </div>
+
+    <div class="card">
+      <h3>Lease${leases.length !== 1 ? "s" : ""} (${leases.length})</h3>
+      ${leases.length ? leases.map(l => renderLeaseCard(l)).join("") : `<div class="empty-state">No lease on file for this unit yet.</div>`}
+    </div>
+
+    <div class="card">
+      <h3>Reported issues (${issues.length})</h3>
+      ${issues.length ? issues.map(i => renderIssueCard(i)).join("") : `<div class="empty-state">No issues reported for this unit.</div>`}
+    </div>
+  `;
+}
+
+// Placeholder read-only renderers - upgraded with review controls
+// (accept/reject/edit) in the lease-review and issue-review commits
+// that follow this scaffold.
+function renderLeaseCard(lease) {
+  return `<div class="muted" data-lease-id="${lease.id}">Lease #${lease.id} - ${escapeHtml(lease.status)} (review UI coming next commit)</div>`;
+}
+function renderIssueCard(issue) {
+  return `<div class="muted" data-issue-id="${issue.id}">Issue #${issue.id} - ${escapeHtml(issue.status)} (review UI coming next commit)</div>`;
+}
+
+// ---------------------------------------------------------------------
+// init
+// ---------------------------------------------------------------------
+loadUnits();
+</script>
+
+</body>
+</html>
