@@ -1,0 +1,9 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+sqlalchemy==2.0.35
+pydantic==2.9.2
+python-multipart==0.0.12
+
+# Optional — only needed if you set ANTHROPIC_API_KEY to use the real
+# LLM path instead of the built-in mock:
+# anthropic==0.34.2
