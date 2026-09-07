@@ -4,6 +4,11 @@ service imports get_lease_extractor() / get_image_assessor() from here -
 never a concrete class directly - so this is the only file that needs to
 know how the decision is made, and it's the same decision (USE_REAL_LLM)
 for both Part A and Part B.
+
+This is also the only file that would need a new branch to add another
+AI provider alongside Anthropic - see app/config.py's "AI provider"
+section for the reasoning, and llm_lease_extractor.py / 
+llm_image_assessor.py for the concrete implementation being switched to.
 """
 from app.ai.base import LeaseExtractor, ImageAssessor
 from app.ai.mock_lease_extractor import MockLeaseExtractor

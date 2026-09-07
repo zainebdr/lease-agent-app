@@ -1,7 +1,14 @@
 """
-Real LLM-backed implementation of LeaseExtractor. Only instantiated by
-app/ai/factory.py when ANTHROPIC_API_KEY is set — not required to run
-the app. Requires: pip install anthropic
+Real, provider-backed implementation of LeaseExtractor. Only
+instantiated by app/ai/factory.py when a real-AI key is configured -
+not required to run the app. Requires: pip install anthropic
+
+This build wires up Anthropic's Claude specifically, but nothing about
+the LeaseExtractor interface or the factory ties the app to Anthropic -
+a different provider is a new class implementing the same interface
+plus one branch in app/ai/factory.py, not a change to any caller. See
+app/config.py's "AI provider" section for why Anthropic is the one
+implemented here.
 
 Design: asks the model to return strict JSON with a value + a short
 verbatim source quote per field, which we store as `source_span`. This

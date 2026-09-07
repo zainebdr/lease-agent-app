@@ -1,7 +1,13 @@
 """
-Real vision-model implementation of ImageAssessor. Only instantiated by
-app/ai/factory.py when ANTHROPIC_API_KEY is set - not required to run
-the app. Requires: pip install anthropic
+Real, provider-backed vision implementation of ImageAssessor. Only
+instantiated by app/ai/factory.py when a real-AI key is configured -
+not required to run the app. Requires: pip install anthropic
+
+This build wires up Anthropic's Claude specifically (same choice as
+llm_lease_extractor.py, see app/config.py's "AI provider" section for
+why), but nothing about the ImageAssessor interface or the factory
+ties the app to Anthropic - a different vision provider is a new class
+implementing the same interface plus one branch in app/ai/factory.py.
 
 Design: sends the photo as an image content block alongside a prompt
 asking for strict JSON (condition, contents, damage_notes, confidence) -
