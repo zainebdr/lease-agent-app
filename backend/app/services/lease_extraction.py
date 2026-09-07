@@ -12,6 +12,7 @@ from datetime import datetime
 from sqlalchemy.orm import Session
 
 from app.ai.factory import get_lease_extractor
+from app.db.enums import LeaseStatus, ReviewState
 from app.db.models import Lease
 from app.services import rule_engine, unit_matching
 
@@ -54,8 +55,8 @@ def process_lease_upload(db: Session, document_text: str, source_document_name: 
         escalation_clause_text=val("escalation_clause_text"),
         escalation_is_defined=val("escalation_is_defined"),
         extracted_fields={k: v.to_dict() for k, v in extracted.items()},
-        review_status={k: "pending" for k in extracted.keys()},
-        status="draft",
+        review_status={k: ReviewState.PENDING.value for k in extracted.keys()},
+        status=LeaseStatus.DRAFT,
     )
     db.add(lease)
     db.flush()  # get lease.id before running checks that reference it

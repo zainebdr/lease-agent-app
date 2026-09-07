@@ -8,6 +8,7 @@ import json
 from sqlalchemy.orm import Session
 
 from app.config import UNITS_SEED_PATH
+from app.db.enums import UnitStatus
 from app.db.models import Unit
 
 
@@ -30,7 +31,7 @@ def seed_units(db: Session) -> None:
                         type=unit.get("type"),
                         area_sqm=unit.get("area_sqm"),
                         parking_bay=unit.get("parking_bay"),
-                        status=unit.get("status", "available"),
+                        status=UnitStatus(unit.get("status", UnitStatus.AVAILABLE.value)),
                     )
                 )
     db.commit()

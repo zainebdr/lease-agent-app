@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db.base import get_db
+from app.db.enums import LeaseStatus, ReviewState, UnitStatus
 from app.db.models import Lease, Unit
 from app.schemas.lease import LeaseOut, LeaseReviewRequest
 from app.services import lease_extraction
@@ -51,9 +52,9 @@ def review_lease(lease_id: int, review: LeaseReviewRequest, db: Session = Depend
 
     for action in review.field_actions:
         if action.action == "accept":
-            review_status[action.field_name] = "accepted"
+            review_status[action.field_name] = ReviewState.ACCEPTED.value
         elif action.action == "reject":
-            review_status[action.field_name] = "rejected"
+            review_status[action.field_name] = ReviewState.REJECTED.value
         elif action.action == "edit":
             if action.field_name not in EDITABLE_LEASE_FIELDS:
                 raise HTTPException(
@@ -61,15 +62,15 @@ def review_lease(lease_id: int, review: LeaseReviewRequest, db: Session = Depend
                     f"'{action.field_name}' cannot be edited via review. "
                     f"Editable fields: {sorted(EDITABLE_LEASE_FIELDS)}",
                 )
-            review_status[action.field_name] = "edited"
+            review_status[action.field_name] = ReviewState.EDITED.value
             setattr(lease, action.field_name, action.new_value)
 
     lease.review_status = review_status
 
     if review.finalize:
-        if "rejected" in review_status.values():
-            lease.status = "rejected"
-        elif "pending" in review_status.values():
+        if ReviewState.REJECTED.value in review_status.values():
+            lease.status = LeaseStatus.REJECTED
+        elif ReviewState.PENDING.value in review_status.values():
             # Every field must be explicitly accepted/rejected/edited
             # before a lease can be finalized - a field nobody has looked
             # at yet is not the same as one that passed review.
@@ -79,11 +80,11 @@ def review_lease(lease_id: int, review: LeaseReviewRequest, db: Session = Depend
                 "Accept, reject, or edit every field before finalizing.",
             )
         else:
-            lease.status = "accepted"
+            lease.status = LeaseStatus.ACCEPTED
             if lease.unit_id:
                 unit = db.get(Unit, lease.unit_id)
                 if unit:
-                    unit.status = "occupied"
+                    unit.status = UnitStatus.OCCUPIED
 
     db.commit()
     db.refresh(lease)

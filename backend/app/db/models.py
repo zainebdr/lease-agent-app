@@ -9,16 +9,45 @@ Design notes:
 - JSON columns use SQLAlchemy's generic JSON type, which maps to a
   native JSON column on Postgres and TEXT-backed JSON on SQLite —
   same model code works unchanged on either engine.
+- Status-like columns (Unit.status, Lease.status, RuleCheck.result, ...)
+  use sqlalchemy.Enum backed by the str-mixin enums in app/db/enums.py,
+  not bare strings — invalid values are rejected at the DB layer, not
+  just documented in a comment.
+- Every table gets created_at/updated_at via TimestampMixin. This
+  product's whole pitch is traceability and review; not being able to
+  say when a lease was uploaded or a field last touched undercuts that.
 """
+from datetime import datetime, timezone
+
 from sqlalchemy import (
-    Column, Integer, String, Float, Boolean, Date, ForeignKey, JSON
+    Column, Integer, String, Float, Boolean, Date, DateTime, ForeignKey, JSON, Enum
 )
-from sqlalchemy.orm import relationship
+from sqlalchemy.orm import relationship, declarative_mixin
 
 from app.db.base import Base
+from app.db.enums import UnitStatus, LeaseStatus, RuleResult
 
 
-class Unit(Base):
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+@declarative_mixin
+class TimestampMixin:
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+
+
+# SQLAlchemy's Enum type defaults to storing a Python enum's `.name`.
+# Our enum *values* (e.g. "available") are what the rest of the app and
+# the seed data (units.json) already use, so every Enum column below
+# passes values_callable to store `.value` instead - keeps the DB
+# content identical to what plain strings would have held.
+def _enum_column(enum_cls, **kw):
+    return Column(Enum(enum_cls, values_callable=lambda e: [m.value for m in e]), **kw)
+
+
+class Unit(Base, TimestampMixin):
     __tablename__ = "units"
 
     unit_id = Column(String, primary_key=True)          # e.g. "MC-B-1204"
@@ -28,16 +57,16 @@ class Unit(Base):
     type = Column(String, nullable=True)                  # "2BR"
     area_sqm = Column(Float, nullable=True)
     parking_bay = Column(String, nullable=True)
-    status = Column(String, nullable=False, default="available")  # available|occupied
+    status = _enum_column(UnitStatus, nullable=False, default=UnitStatus.AVAILABLE)
 
     leases = relationship("Lease", back_populates="unit")
 
 
-class Lease(Base):
+class Lease(Base, TimestampMixin):
     __tablename__ = "leases"
 
     id = Column(Integer, primary_key=True)
-    unit_id = Column(String, ForeignKey("units.unit_id"), nullable=True)
+    unit_id = Column(String, ForeignKey("units.unit_id"), nullable=True, index=True)
     source_document_name = Column(String, nullable=False)
 
     landlord_name = Column(String, nullable=True)
@@ -58,10 +87,12 @@ class Lease(Base):
 
     # {field_name: {"value": ..., "source_span": "...", "confidence": 0.0-1.0}}
     extracted_fields = Column(JSON, default=dict)
-    # {field_name: "pending" | "accepted" | "rejected" | "edited"}
+    # {field_name: "pending" | "accepted" | "rejected" | "edited"} — see
+    # app/db/enums.py:ReviewState for the allowed values (JSON can't
+    # enforce this at the DB layer the way the Enum columns do).
     review_status = Column(JSON, default=dict)
 
-    status = Column(String, default="draft")  # draft | accepted | rejected
+    status = _enum_column(LeaseStatus, nullable=False, default=LeaseStatus.DRAFT, index=True)
 
     unit = relationship("Unit", back_populates="leases")
     rule_checks = relationship(
@@ -69,15 +100,15 @@ class Lease(Base):
     )
 
 
-class RuleCheck(Base):
+class RuleCheck(Base, TimestampMixin):
     __tablename__ = "rule_checks"
 
     id = Column(Integer, primary_key=True)
-    lease_id = Column(Integer, ForeignKey("leases.id"), nullable=False)
+    lease_id = Column(Integer, ForeignKey("leases.id"), nullable=False, index=True)
     rule_id = Column(String, nullable=False)         # "R1".."R7"
     description = Column(String, nullable=True)
     severity = Column(String, nullable=True)
-    result = Column(String, nullable=False)          # PASS | FAIL | NOT_DETERMINABLE
+    result = _enum_column(RuleResult, nullable=False, index=True)
     reason = Column(String, nullable=True)
     source_clause = Column(String, nullable=True)
 
