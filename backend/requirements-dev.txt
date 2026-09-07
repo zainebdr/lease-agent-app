@@ -1,0 +1,7 @@
+-r requirements.txt
+
+# Test-only dependencies. Not needed to run the app itself - only to run
+# `pytest` from backend/. Kept separate from requirements.txt so a
+# reviewer just running the app doesn't need to install a test runner.
+pytest==8.3.3
+httpx==0.27.2   # TestClient (in fastapi.testclient) is httpx-based
