@@ -37,3 +37,46 @@ class LeaseExtractor(Protocol):
         NOT_DETERMINABLE rather than guessing a default.
         """
         ...
+
+
+class PhotoAssessment:
+    """The result of assessing a single uploaded property photo."""
+
+    def __init__(
+        self,
+        condition: str,
+        contents: list[str],
+        damage_notes: str | None,
+        confidence: float,
+        assessed_by: str = "unknown",
+    ):
+        self.condition = condition
+        self.contents = contents
+        self.damage_notes = damage_notes
+        self.confidence = confidence
+        self.assessed_by = assessed_by  # "mock" or the real model id used
+
+    def to_dict(self) -> dict:
+        return {
+            "condition": self.condition,
+            "contents": self.contents,
+            "damage_notes": self.damage_notes,
+            "confidence": self.confidence,
+            "assessed_by": self.assessed_by,
+        }
+
+
+class ImageAssessor(Protocol):
+    def assess(self, image_bytes: bytes, filename: str) -> PhotoAssessment:
+        """
+        Assess a single property photo:
+        - condition: e.g. "new" vs. "worn/old", any visible damage
+        - contents: equipment/fixtures visible (AC unit, water heater,
+          appliances, ...) so the owner knows what the unit holds and
+          what the issue concerns
+        Always returns a result (never omits fields the way lease
+        extraction can) — a photo assessment has no equivalent of a
+        missing label to key off, so confidence is what communicates
+        uncertainty here rather than an absent key.
+        """
+        ...
