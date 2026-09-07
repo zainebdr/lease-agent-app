@@ -1,5 +1,3 @@
-from datetime import date
-
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.orm import Session
 
@@ -21,12 +19,6 @@ EDITABLE_LEASE_FIELDS = {
     "monthly_rent", "annual_rent", "deposit_amount",
     "escalation_clause_text", "escalation_is_defined",
 }
-
-# Fields whose column type is a real date - an edit sends a plain ISO
-# string ("2026-03-01"), which must be converted before assignment.
-# SQLite is loose enough to sometimes accept a raw string here, but that
-# is not something to rely on (Postgres, e.g., would not).
-_DATE_FIELDS = {"commencement_date", "expiry_date"}
 
 
 @router.post("/upload", response_model=LeaseOut)
@@ -93,11 +85,12 @@ def review_lease(lease_id: int, review: LeaseReviewRequest, db: Session = Depend
                     f"'{action.field_name}' cannot be edited via review. "
                     f"Editable fields: {sorted(EDITABLE_LEASE_FIELDS)}",
                 )
-            new_value = action.new_value
-            if action.field_name in _DATE_FIELDS and isinstance(new_value, str):
-                new_value = date.fromisoformat(new_value)
+            # action.new_value has already been type/shape-validated and
+            # coerced (e.g. an ISO date string -> a real date) by
+            # FieldReviewAction's model_validator - nothing left to do
+            # here but assign it.
             review_status[action.field_name] = ReviewState.EDITED.value
-            setattr(lease, action.field_name, new_value)
+            setattr(lease, action.field_name, action.new_value)
 
     lease.review_status = review_status
 
