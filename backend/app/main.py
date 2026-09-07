@@ -2,10 +2,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
+from app.config import UPLOAD_DIR
 from app.db.base import Base, engine, SessionLocal
 from app.db.seed import seed_units
-from app.api import leases, units
+from app.api import leases, units, issues
 
 
 @asynccontextmanager
@@ -30,6 +32,12 @@ app.add_middleware(
 
 app.include_router(leases.router)
 app.include_router(units.router)
+app.include_router(issues.router)
+
+# Serves uploaded issue photos back out (e.g. /uploads/issue_3_0_photo.jpg)
+# so a reviewer can see the actual photo next to its AI assessment, not
+# just the assessment text.
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 
 @app.get("/health")
