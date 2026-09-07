@@ -181,6 +181,8 @@ const API_BASE = "http://localhost:8000";
 // toggled by hiding/showing. Enough for three screens; would be the
 // first thing to replace with something real if this grew past that.
 // ---------------------------------------------------------------------
+let currentUnitId = null;
+
 function showView(id) {
   document.querySelectorAll(".view").forEach(v => v.hidden = (v.id !== id));
   document.querySelectorAll("nav button").forEach(b => {
@@ -298,6 +300,7 @@ async function populateUnitSelect() {
 // lease(s) and reported issues, in one place.
 // ---------------------------------------------------------------------
 async function openUnitDetail(unitId) {
+  currentUnitId = unitId;
   showView("unit-detail-view");
   document.getElementById("unit-detail-title").textContent = "Loading…";
   clearError("unit-detail-error");
@@ -335,15 +338,176 @@ function renderUnitDetail(data) {
   `;
 }
 
-// Placeholder read-only renderers - upgraded with review controls
-// (accept/reject/edit) in the lease-review and issue-review commits
-// that follow this scaffold.
-function renderLeaseCard(lease) {
-  return `<div class="muted" data-lease-id="${lease.id}">Lease #${lease.id} - ${escapeHtml(lease.status)} (review UI coming next commit)</div>`;
+// ---------------------------------------------------------------------
+// Lease review - accept/reject/edit each extracted field, then finalize.
+//
+// EDITABLE_LEASE_FIELDS mirrors the whitelist enforced server-side in
+// api/leases.py (EDITABLE_LEASE_FIELDS) - kept in sync by hand since
+// there's no shared schema file between frontend and backend in this
+// build. A field like unit_reference_text is reviewable (accept/reject)
+// but not editable, same as the API only allows.
+// ---------------------------------------------------------------------
+const EDITABLE_LEASE_FIELDS = new Set([
+  "landlord_name", "tenant_name", "landlord_signed", "tenant_signed",
+  "commencement_date", "expiry_date", "term_months",
+  "monthly_rent", "annual_rent", "deposit_amount",
+  "escalation_clause_text", "escalation_is_defined",
+]);
+
+// Used only client-side, to send edit values as the right JSON type
+// (a real boolean/number, not a string) - the API does not currently
+// coerce or validate new_value's type against the target column, so
+// getting this right here avoids feeding it a value it would silently
+// mis-store (e.g. the string "false" is truthy).
+const LEASE_FIELD_TYPES = {
+  landlord_signed: "boolean", tenant_signed: "boolean", escalation_is_defined: "boolean",
+  term_months: "number", monthly_rent: "number", annual_rent: "number", deposit_amount: "number",
+  commencement_date: "date", expiry_date: "date",
+};
+
+function currentFieldValue(lease, key) {
+  if (Object.prototype.hasOwnProperty.call(lease, key)) return lease[key];
+  const ef = lease.extracted_fields[key];
+  return ef ? ef.value : null;
 }
+
+function renderLeaseCard(lease) {
+  const fieldKeys = Object.keys(lease.review_status || {});
+  const isDraft = lease.status === "draft";
+
+  const fieldsHtml = fieldKeys.map(key => {
+    const ef = lease.extracted_fields[key] || {};
+    const value = currentFieldValue(lease, key);
+    const reviewState = lease.review_status[key] || "pending";
+    const editable = EDITABLE_LEASE_FIELDS.has(key);
+    return `
+      <div class="field-row">
+        <span class="field-name">${escapeHtml(key)}</span>
+        <span class="field-value">
+          ${escapeHtml(value === null || value === undefined ? "\u2014" : String(value))}
+          <div class="field-meta">
+            ${ef.source_span ? `source: ${escapeHtml(ef.source_span)} &middot; ` : ""}${ef.confidence != null ? `confidence ${Number(ef.confidence).toFixed(2)} &middot; ` : ""}${reviewBadge(reviewState)}
+          </div>
+        </span>
+        ${isDraft ? `
+        <div class="field-actions">
+          <button type="button" data-lease-action="accept" data-field="${escapeHtml(key)}">Accept</button>
+          <button type="button" data-lease-action="reject" data-field="${escapeHtml(key)}">Reject</button>
+          ${editable ? `<button type="button" data-lease-action="edit" data-field="${escapeHtml(key)}" data-current-value="${escapeHtml(value == null ? "" : String(value))}">Edit</button>` : ""}
+        </div>` : ""}
+      </div>
+    `;
+  }).join("");
+
+  const rulesHtml = (lease.rule_checks || []).map(rc => `
+    <div class="rule-row">
+      <span class="rule-id">${escapeHtml(rc.rule_id)}</span>
+      ${ruleResultBadge(rc.result)}
+      <span>${escapeHtml(rc.description || "")} <span class="muted">- ${escapeHtml(rc.reason || "")}</span></span>
+    </div>
+  `).join("");
+
+  return `
+    <div data-lease-card="${lease.id}" class="lease-card">
+      <div class="field-row">
+        <span class="field-name">Lease #${lease.id}</span>
+        <span class="field-value">${escapeHtml(lease.source_document_name)} ${reviewBadge(lease.status)}</span>
+      </div>
+      <h4>Extracted fields</h4>
+      ${fieldsHtml || `<div class="empty-state">No fields extracted.</div>`}
+      <h4>Rule checks</h4>
+      ${rulesHtml || `<div class="empty-state">No rule checks recorded.</div>`}
+      ${isDraft ? `<button type="button" class="primary" data-lease-action="finalize" style="margin-top:12px;">Finalize</button>` : ""}
+    </div>
+  `;
+}
+
+// Placeholder - upgraded with review controls (accept/reject/edit) in
+// the issue-review commit that follows this one.
 function renderIssueCard(issue) {
   return `<div class="muted" data-issue-id="${issue.id}">Issue #${issue.id} - ${escapeHtml(issue.status)} (review UI coming next commit)</div>`;
 }
+
+// A boolean field gets confirm() (a real true/false), a number field gets
+// its prompt() answer parsed with Number(), everything else (text, ISO
+// date strings) is sent as-is. Returns undefined if the user cancelled.
+function promptForEdit(field, currentValue) {
+  const type = LEASE_FIELD_TYPES[field] || "text";
+  if (type === "boolean") {
+    return window.confirm(`Set "${field}" to TRUE?\n\nOK = true, Cancel = false.`);
+  }
+  const raw = window.prompt(`New value for "${field}":`, currentValue ?? "");
+  if (raw === null) return undefined;
+  return type === "number" ? Number(raw) : raw;
+}
+
+async function submitLeaseReview(leaseId, payload) {
+  return api(`/leases/${leaseId}/review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+// Single delegated listener for every rendered lease card, wherever it
+// appears (upload result or unit detail) - simpler than re-attaching
+// per-render handlers, and correct either way since the DOM nodes are
+// replaced wholesale after each action.
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-lease-action]");
+  if (!btn) return;
+  const wrapper = btn.closest("[data-lease-card]");
+  if (!wrapper) return;
+  const leaseId = wrapper.dataset.leaseCard;
+  const action = btn.dataset.leaseAction;
+  const field = btn.dataset.field;
+
+  let payload;
+  if (action === "finalize") {
+    payload = { field_actions: [], finalize: true };
+  } else if (action === "edit") {
+    const newValue = promptForEdit(field, btn.dataset.currentValue);
+    if (newValue === undefined) return; // cancelled
+    payload = { field_actions: [{ field_name: field, action: "edit", new_value: newValue }] };
+  } else {
+    payload = { field_actions: [{ field_name: field, action }] };
+  }
+
+  try {
+    const updated = await submitLeaseReview(leaseId, payload);
+    // Finalize can change the unit's own status (draft -> accepted flips
+    // the unit to occupied) - if we're looking at the unit detail screen,
+    // refresh the whole thing so that badge stays correct too, not just
+    // this one lease card.
+    if (action === "finalize" && currentUnitId && !document.getElementById("unit-detail-view").hidden) {
+      await openUnitDetail(currentUnitId);
+    } else {
+      wrapper.outerHTML = renderLeaseCard(updated);
+    }
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+document.getElementById("upload-lease-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  clearError("lease-upload-error");
+  const fileInput = document.getElementById("lease-file");
+  if (!fileInput.files.length) return;
+
+  const formData = new FormData();
+  formData.append("file", fileInput.files[0]);
+
+  const resultEl = document.getElementById("lease-result");
+  resultEl.innerHTML = `<div class="empty-state">Uploading and extracting\u2026</div>`;
+  try {
+    const lease = await api("/leases/upload", { method: "POST", body: formData });
+    resultEl.innerHTML = `<div class="card">${renderLeaseCard(lease)}</div>`;
+  } catch (err) {
+    resultEl.innerHTML = "";
+    showError("lease-upload-error", err);
+  }
+});
 
 // ---------------------------------------------------------------------
 // init
