@@ -238,6 +238,19 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// escapeHtml is only safe for HTML TEXT content - it does not escape
+// quote characters, which matter only inside an attribute value. Use
+// this one instead whenever a value is being placed inside a "..."
+// HTML attribute (data-current-value, alt text, etc).
+function escapeAttr(str) {
+  return String(str ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 // ---------------------------------------------------------------------
 // Badges
 // ---------------------------------------------------------------------
@@ -393,7 +406,7 @@ function renderLeaseCard(lease) {
         <div class="field-actions">
           <button type="button" data-lease-action="accept" data-field="${escapeHtml(key)}">Accept</button>
           <button type="button" data-lease-action="reject" data-field="${escapeHtml(key)}">Reject</button>
-          ${editable ? `<button type="button" data-lease-action="edit" data-field="${escapeHtml(key)}" data-current-value="${escapeHtml(value == null ? "" : String(value))}">Edit</button>` : ""}
+          ${editable ? `<button type="button" data-lease-action="edit" data-field="${escapeHtml(key)}" data-current-value="${escapeAttr(value == null ? "" : String(value))}">Edit</button>` : ""}
         </div>` : ""}
       </div>
     `;
@@ -422,11 +435,132 @@ function renderLeaseCard(lease) {
   `;
 }
 
-// Placeholder - upgraded with review controls (accept/reject/edit) in
-// the issue-review commit that follows this one.
+// ---------------------------------------------------------------------
+// Issue / work order review - accept, reject, or edit-then-accept the
+// drafted work order as a whole (not per-field like a lease - the brief
+// asks for each *draft work order* to be reviewed, matching how the API
+// treats it: POST /issues/{id}/review takes one action for the whole
+// draft, plus optional title/description edits applied first).
+// ---------------------------------------------------------------------
 function renderIssueCard(issue) {
-  return `<div class="muted" data-issue-id="${issue.id}">Issue #${issue.id} - ${escapeHtml(issue.status)} (review UI coming next commit)</div>`;
+  const wo = issue.work_order;
+  const isDraft = wo && wo.status === "draft";
+
+  const photosHtml = (issue.photos || []).map(p => `
+    <div class="field-row">
+      <img class="photo-thumb" src="${API_BASE}/uploads/${encodeURIComponent(p.file_path)}"
+           alt="${escapeAttr(p.file_path)}" onerror="this.style.display='none'">
+      <span class="field-value">
+        <div>${escapeHtml(p.condition_assessment || "-")}</div>
+        <div class="field-meta">
+          contents: ${escapeHtml((p.contents_detected || []).join(", ") || "none noted")}
+          ${p.damage_notes ? ` &middot; ${escapeHtml(p.damage_notes)}` : ""}
+          &middot; confidence ${p.confidence != null ? Number(p.confidence).toFixed(2) : "-"}
+          &middot; assessed by ${escapeHtml(p.assessed_by || "-")}
+        </div>
+      </span>
+    </div>
+  `).join("");
+
+  const woHtml = wo ? `
+    <div class="field-row"><span class="field-name">Title</span><span class="field-value">${escapeHtml(wo.title)}</span></div>
+    <div class="field-row"><span class="field-name">Description</span><span class="field-value">${escapeHtml(wo.description)}</span></div>
+    <div class="field-row"><span class="field-name">Status</span><span class="field-value">${reviewBadge(wo.status)}</span></div>
+    ${isDraft ? `
+      <div class="field-actions">
+        <button type="button" data-issue-action="edit-title" data-current-title="${escapeAttr(wo.title)}">Edit title</button>
+        <button type="button" data-issue-action="edit-description" data-current-description="${escapeAttr(wo.description)}">Edit description</button>
+        <button type="button" class="primary" data-issue-action="accept">Accept</button>
+        <button type="button" data-issue-action="reject">Reject</button>
+      </div>
+    ` : ""}
+  ` : `<div class="empty-state">No work order drafted.</div>`;
+
+  return `
+    <div data-issue-card="${issue.id}" class="lease-card">
+      <div class="field-row">
+        <span class="field-name">Issue #${issue.id}</span>
+        <span class="field-value">${escapeHtml(issue.condition_summary || "-")} ${reviewBadge(issue.status)}</span>
+      </div>
+      <div class="field-row">
+        <span class="field-name">Contents / equipment</span>
+        <span class="field-value">${escapeHtml((issue.contents_summary || []).join(", ") || "none noted")}</span>
+      </div>
+      <h4>Photos (${(issue.photos || []).length})</h4>
+      ${photosHtml || `<div class="empty-state">No photos.</div>`}
+      <h4>Draft work order</h4>
+      ${woHtml}
+    </div>
+  `;
 }
+
+async function submitIssueReview(issueId, payload) {
+  return api(`/issues/${issueId}/review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest("[data-issue-action]");
+  if (!btn) return;
+  const wrapper = btn.closest("[data-issue-card]");
+  if (!wrapper) return;
+  const issueId = wrapper.dataset.issueCard;
+  const action = btn.dataset.issueAction;
+
+  let payload = {};
+  if (action === "accept" || action === "reject") {
+    payload = { action };
+  } else if (action === "edit-title") {
+    const newTitle = window.prompt("New title:", btn.dataset.currentTitle ?? "");
+    if (newTitle === null) return;
+    payload = { title: newTitle };
+  } else if (action === "edit-description") {
+    const newDescription = window.prompt("New description:", btn.dataset.currentDescription ?? "");
+    if (newDescription === null) return;
+    payload = { description: newDescription };
+  }
+
+  try {
+    const updated = await submitIssueReview(issueId, payload);
+    // Same reasoning as the lease finalize handler: if we're on the
+    // unit detail screen, a full refresh keeps everything (not just
+    // this card) consistent with the latest state.
+    if (currentUnitId && !document.getElementById("unit-detail-view").hidden) {
+      await openUnitDetail(currentUnitId);
+    } else {
+      wrapper.outerHTML = renderIssueCard(updated);
+    }
+  } catch (err) {
+    alert(err.message);
+  }
+});
+
+document.getElementById("report-issue-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  clearError("issue-upload-error");
+  const unitId = document.getElementById("issue-unit-select").value;
+  const reportedBy = document.getElementById("issue-reported-by").value.trim();
+  const files = document.getElementById("issue-files").files;
+  if (!unitId || !files.length) return;
+
+  const formData = new FormData();
+  formData.append("unit_id", unitId);
+  if (reportedBy) formData.append("reported_by", reportedBy);
+  for (const f of files) formData.append("files", f);
+
+  const resultEl = document.getElementById("issue-result");
+  resultEl.innerHTML = `<div class="empty-state">Uploading and assessing\u2026</div>`;
+  try {
+    const issue = await api("/issues/upload", { method: "POST", body: formData });
+    resultEl.innerHTML = `<div class="card">${renderIssueCard(issue)}</div>`;
+  } catch (err) {
+    resultEl.innerHTML = "";
+    showError("issue-upload-error", err);
+  }
+});
 
 // A boolean field gets confirm() (a real true/false), a number field gets
 // its prompt() answer parsed with Number(), everything else (text, ISO
