@@ -101,6 +101,15 @@ def review_lease(lease_id: int, review: LeaseReviewRequest, db: Session = Depend
 
     lease.review_status = review_status
 
+    # Re-run the rule engine against whatever the lease's fields hold
+    # right now. If a field was just edited, the persisted RuleCheck
+    # rows must reflect that value, not the original AI extraction -
+    # otherwise a displayed PASS/FAIL can describe data a human already
+    # overwrote, which defeats the point of a checkable record. Always
+    # refreshed, not just when an edit happened, so this stays correct
+    # without tracking "did anything actually change" separately.
+    lease_extraction.refresh_rule_checks(db, lease)
+
     if review.finalize:
         if ReviewState.REJECTED.value in review_status.values():
             lease.status = LeaseStatus.REJECTED

@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.factory import get_lease_extractor
 from app.db.enums import LeaseStatus, ReviewState
-from app.db.models import Lease
+from app.db.models import Lease, RuleCheck, Unit
 from app.services import rule_engine, unit_matching
 
 
@@ -71,5 +71,24 @@ def process_lease_upload(db: Session, document_text: str, source_document_name: 
 
 
 def rule_engine_row(lease_id: int, result: dict):
-    from app.db.models import RuleCheck
     return RuleCheck(lease_id=lease_id, **result)
+
+
+def refresh_rule_checks(db: Session, lease: Lease) -> None:
+    """Re-run the rule engine against whatever the lease's fields hold
+    right now, and replace its persisted RuleCheck rows with the fresh
+    result.
+
+    Called after every review action that can change a lease's field
+    values (an "edit"), so a displayed PASS/FAIL always describes the
+    lease as it currently stands, not a stale extraction-time snapshot.
+    Deliberately unconditional (always refreshes, not just "if
+    something changed") - that keeps this correct without the caller
+    having to track edit state separately, and re-running 7 in-memory
+    checks is cheap enough that it isn't worth the bookkeeping to skip.
+    Does not commit - the caller controls the transaction boundary.
+    """
+    unit = db.get(Unit, lease.unit_id) if lease.unit_id else None
+    db.query(RuleCheck).filter(RuleCheck.lease_id == lease.id).delete()
+    for result in rule_engine.run_all_checks(lease, unit):
+        db.add(rule_engine_row(lease.id, result))
