@@ -50,6 +50,18 @@ def review_work_order(issue_id: int, review: WorkOrderReviewRequest, db: Session
 
     work_order = issue.work_order
 
+    if work_order.status != WorkOrderStatus.DRAFT:
+        # Same reasoning as the lease finalize-lock: a work order that's
+        # already been accepted or rejected (and may already have moved
+        # the issue to "in_progress") must not be silently re-decidable -
+        # that could flip Issue.status back and forth out of step with
+        # what actually happened. Reopening a decided work order isn't
+        # supported yet; that would be its own explicit action.
+        raise HTTPException(
+            409,
+            f"This work order is already '{work_order.status.value}' and can no longer be reviewed.",
+        )
+
     # Edits apply first, so an accept/reject in the same request reflects
     # the edited text rather than the original AI-drafted one.
     if review.title is not None:
