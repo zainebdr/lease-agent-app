@@ -54,6 +54,8 @@ class FieldReviewAction(BaseModel):
 
 
 class LeaseReviewRequest(BaseModel):
+    action: Optional[str] = None  # "reject" to reject the whole lease outright,
+                                   # independent of the per-field flow below
     field_actions: list[FieldReviewAction] = []
     finalize: bool = False   # if true and no field is rejected, marks lease accepted
                               # and flips the unit's status to "occupied"

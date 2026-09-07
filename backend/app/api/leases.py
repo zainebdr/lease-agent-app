@@ -68,6 +68,17 @@ def review_lease(lease_id: int, review: LeaseReviewRequest, db: Session = Depend
             f"This lease is already '{lease.status.value}' and can no longer be reviewed.",
         )
 
+    # A human can reject the whole lease outright, independent of the
+    # per-field flow below - same shape as how a work order is accepted
+    # or rejected as a whole rather than field by field.
+    if review.action == "reject":
+        lease.status = LeaseStatus.REJECTED
+        db.commit()
+        db.refresh(lease)
+        return lease
+    if review.action is not None:
+        raise HTTPException(400, "action must be 'reject' or omitted.")
+
     review_status = dict(lease.review_status or {})
 
     for action in review.field_actions:
