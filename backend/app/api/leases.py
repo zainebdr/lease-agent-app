@@ -1,3 +1,5 @@
+from datetime import date
+
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.orm import Session
 
@@ -19,6 +21,12 @@ EDITABLE_LEASE_FIELDS = {
     "monthly_rent", "annual_rent", "deposit_amount",
     "escalation_clause_text", "escalation_is_defined",
 }
+
+# Fields whose column type is a real date - an edit sends a plain ISO
+# string ("2026-03-01"), which must be converted before assignment.
+# SQLite is loose enough to sometimes accept a raw string here, but that
+# is not something to rely on (Postgres, e.g., would not).
+_DATE_FIELDS = {"commencement_date", "expiry_date"}
 
 
 @router.post("/upload", response_model=LeaseOut)
@@ -48,6 +56,18 @@ def review_lease(lease_id: int, review: LeaseReviewRequest, db: Session = Depend
     if not lease:
         raise HTTPException(404, "Lease not found.")
 
+    if lease.status != LeaseStatus.DRAFT:
+        # Finalized means finalized - a lease that is already accepted or
+        # rejected (and may already have flipped its unit's status) must
+        # not be silently editable through this endpoint. Reopening a
+        # finalized lease deliberately isn't supported yet; that would be
+        # its own explicit, logged action, not a side effect of a normal
+        # review call landing on the wrong lease.
+        raise HTTPException(
+            409,
+            f"This lease is already '{lease.status.value}' and can no longer be reviewed.",
+        )
+
     review_status = dict(lease.review_status or {})
 
     for action in review.field_actions:
@@ -62,8 +82,11 @@ def review_lease(lease_id: int, review: LeaseReviewRequest, db: Session = Depend
                     f"'{action.field_name}' cannot be edited via review. "
                     f"Editable fields: {sorted(EDITABLE_LEASE_FIELDS)}",
                 )
+            new_value = action.new_value
+            if action.field_name in _DATE_FIELDS and isinstance(new_value, str):
+                new_value = date.fromisoformat(new_value)
             review_status[action.field_name] = ReviewState.EDITED.value
-            setattr(lease, action.field_name, action.new_value)
+            setattr(lease, action.field_name, new_value)
 
     lease.review_status = review_status
 
