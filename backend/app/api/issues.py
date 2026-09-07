@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db.base import get_db
-from app.db.enums import WorkOrderStatus
+from app.db.enums import IssueStatus, WorkOrderStatus
 from app.db.models import Issue
 from app.schemas.issue import IssueOut, WorkOrderReviewRequest
 from app.services import issue_reporting
@@ -59,8 +59,20 @@ def review_work_order(issue_id: int, review: WorkOrderReviewRequest, db: Session
 
     if review.action == "accept":
         work_order.status = WorkOrderStatus.ACCEPTED
+        # Accepting the draft is what turns a reported issue into
+        # something actually being worked - the issue itself moves from
+        # "open" (reported, nothing approved yet) to "in_progress".
+        # Marking it "resolved" is a separate, later action (the work
+        # actually being completed) that this build doesn't have a flow
+        # for yet - see README.
+        issue.status = IssueStatus.IN_PROGRESS
     elif review.action == "reject":
         work_order.status = WorkOrderStatus.REJECTED
+        # Rejecting the draft doesn't resolve or dismiss the underlying
+        # issue - the property problem the photos showed is still there,
+        # it just means this drafted work order wasn't right. The issue
+        # stays "open" so it keeps showing up as needing attention (e.g.
+        # a corrected work order, or a human writing one from scratch).
     elif review.action is not None:
         raise HTTPException(400, "action must be 'accept' or 'reject' (or omitted to just edit).")
 
