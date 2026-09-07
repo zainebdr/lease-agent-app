@@ -104,6 +104,7 @@
     padding: 10px 12px; font-size: 13px; margin-bottom: 12px;
   }
   .photo-thumb { max-width: 140px; max-height: 100px; border-radius: 6px; border: 1px solid var(--border); }
+  .edit-input { padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; font-size: 13px; width: 100%; max-width: 260px; }
 </style>
 </head>
 <body>
@@ -384,33 +385,68 @@ function currentFieldValue(lease, key) {
   return ef ? ef.value : null;
 }
 
+// Renders one extracted-field row. `editing` swaps the read-only value +
+// Accept/Reject/Edit controls for an inline input + Save/Cancel - no
+// popups, no full-card reload just to type a correction.
+function renderLeaseFieldRow(lease, key, isDraft, editing) {
+  const ef = lease.extracted_fields[key] || {};
+  const value = currentFieldValue(lease, key);
+  const reviewState = lease.review_status[key] || "pending";
+  const editable = EDITABLE_LEASE_FIELDS.has(key);
+  const type = LEASE_FIELD_TYPES[key] || "text";
+
+  let valueHtml;
+  if (editing) {
+    if (type === "boolean") {
+      valueHtml = `<select class="edit-input" data-edit-input>
+        <option value="true" ${value ? "selected" : ""}>true</option>
+        <option value="false" ${!value ? "selected" : ""}>false</option>
+      </select>`;
+    } else {
+      const inputType = type === "number" ? "number" : type === "date" ? "date" : "text";
+      valueHtml = `<input type="${inputType}" class="edit-input" data-edit-input
+        ${type === "number" ? 'step="any"' : ""}
+        value="${escapeAttr(value == null ? "" : String(value))}">`;
+    }
+  } else {
+    valueHtml = `
+      ${escapeHtml(value === null || value === undefined ? "—" : String(value))}
+      <div class="field-meta">
+        ${ef.source_span ? `source: ${escapeHtml(ef.source_span)} &middot; ` : ""}${ef.confidence != null ? `confidence ${Number(ef.confidence).toFixed(2)} &middot; ` : ""}${reviewBadge(reviewState)}
+      </div>`;
+  }
+
+  let actionsHtml = "";
+  if (isDraft && editing) {
+    actionsHtml = `
+      <div class="field-actions">
+        <button type="button" data-lease-action="save-edit" data-field="${escapeAttr(key)}">Save</button>
+        <button type="button" data-lease-action="cancel-edit" data-field="${escapeAttr(key)}">Cancel</button>
+      </div>`;
+  } else if (isDraft) {
+    actionsHtml = `
+      <div class="field-actions">
+        <button type="button" data-lease-action="accept" data-field="${escapeAttr(key)}">Accept</button>
+        <button type="button" data-lease-action="reject" data-field="${escapeAttr(key)}">Reject</button>
+        ${editable ? `<button type="button" data-lease-action="edit" data-field="${escapeAttr(key)}">Edit</button>` : ""}
+      </div>`;
+  }
+
+  return `
+    <div class="field-row" data-field-row="${escapeAttr(key)}">
+      <span class="field-name">${escapeHtml(key)}</span>
+      <span class="field-value">${valueHtml}</span>
+      ${actionsHtml}
+    </div>
+  `;
+}
+
 function renderLeaseCard(lease) {
   const fieldKeys = Object.keys(lease.review_status || {});
   const isDraft = lease.status === "draft";
+  const pendingCount = fieldKeys.filter(k => lease.review_status[k] === "pending").length;
 
-  const fieldsHtml = fieldKeys.map(key => {
-    const ef = lease.extracted_fields[key] || {};
-    const value = currentFieldValue(lease, key);
-    const reviewState = lease.review_status[key] || "pending";
-    const editable = EDITABLE_LEASE_FIELDS.has(key);
-    return `
-      <div class="field-row">
-        <span class="field-name">${escapeHtml(key)}</span>
-        <span class="field-value">
-          ${escapeHtml(value === null || value === undefined ? "\u2014" : String(value))}
-          <div class="field-meta">
-            ${ef.source_span ? `source: ${escapeHtml(ef.source_span)} &middot; ` : ""}${ef.confidence != null ? `confidence ${Number(ef.confidence).toFixed(2)} &middot; ` : ""}${reviewBadge(reviewState)}
-          </div>
-        </span>
-        ${isDraft ? `
-        <div class="field-actions">
-          <button type="button" data-lease-action="accept" data-field="${escapeHtml(key)}">Accept</button>
-          <button type="button" data-lease-action="reject" data-field="${escapeHtml(key)}">Reject</button>
-          ${editable ? `<button type="button" data-lease-action="edit" data-field="${escapeHtml(key)}" data-current-value="${escapeAttr(value == null ? "" : String(value))}">Edit</button>` : ""}
-        </div>` : ""}
-      </div>
-    `;
-  }).join("");
+  const fieldsHtml = fieldKeys.map(key => renderLeaseFieldRow(lease, key, isDraft, false)).join("");
 
   const rulesHtml = (lease.rule_checks || []).map(rc => `
     <div class="rule-row">
@@ -420,8 +456,12 @@ function renderLeaseCard(lease) {
     </div>
   `).join("");
 
+  // The lease's own JSON is stashed on the card so edit/cancel-edit can
+  // re-render a single field row without an extra round trip to the API
+  // just to redraw a form - only actions that change state (accept,
+  // reject, save-edit, accept-all, finalize) actually call the server.
   return `
-    <div data-lease-card="${lease.id}" class="lease-card">
+    <div data-lease-card="${lease.id}" class="lease-card" data-lease="${escapeAttr(JSON.stringify(lease))}">
       <div class="field-row">
         <span class="field-name">Lease #${lease.id}</span>
         <span class="field-value">${escapeHtml(lease.source_document_name)} ${reviewBadge(lease.status)}</span>
@@ -430,7 +470,13 @@ function renderLeaseCard(lease) {
       ${fieldsHtml || `<div class="empty-state">No fields extracted.</div>`}
       <h4>Rule checks</h4>
       ${rulesHtml || `<div class="empty-state">No rule checks recorded.</div>`}
-      ${isDraft ? `<button type="button" class="primary" data-lease-action="finalize" style="margin-top:12px;">Finalize</button>` : ""}
+      ${isDraft ? `
+        <div class="field-actions" style="margin-top:12px;">
+          ${pendingCount > 0 ? `<button type="button" data-lease-action="accept-all">Accept all pending (${pendingCount})</button>` : ""}
+          <button type="button" class="primary" data-lease-action="finalize" ${pendingCount > 0 ? "disabled" : ""} ${pendingCount > 0 ? `title="Resolve all ${pendingCount} pending field(s) first"` : ""}>Finalize</button>
+        </div>
+        ${pendingCount > 0 ? `<div class="field-meta" style="margin-top:6px;">${pendingCount} field(s) still pending - accept, reject, or edit them (or use "Accept all pending") before you can finalize.</div>` : ""}
+      ` : ""}
     </div>
   `;
 }
@@ -562,18 +608,6 @@ document.getElementById("report-issue-form").addEventListener("submit", async (e
   }
 });
 
-// A boolean field gets confirm() (a real true/false), a number field gets
-// its prompt() answer parsed with Number(), everything else (text, ISO
-// date strings) is sent as-is. Returns undefined if the user cancelled.
-function promptForEdit(field, currentValue) {
-  const type = LEASE_FIELD_TYPES[field] || "text";
-  if (type === "boolean") {
-    return window.confirm(`Set "${field}" to TRUE?\n\nOK = true, Cancel = false.`);
-  }
-  const raw = window.prompt(`New value for "${field}":`, currentValue ?? "");
-  if (raw === null) return undefined;
-  return type === "number" ? Number(raw) : raw;
-}
 
 async function submitLeaseReview(leaseId, payload) {
   return api(`/leases/${leaseId}/review`, {
@@ -587,6 +621,13 @@ async function submitLeaseReview(leaseId, payload) {
 // appears (upload result or unit detail) - simpler than re-attaching
 // per-render handlers, and correct either way since the DOM nodes are
 // replaced wholesale after each action.
+//
+// "edit" and "cancel-edit" are pure client-side UI toggles - no API
+// call, just re-rendering that one field row from the lease JSON
+// already stashed on the card. Everything else (accept, reject,
+// save-edit, accept-all, finalize) calls the review API and then
+// either refreshes the whole unit view (finalize can change the
+// unit's own status) or just swaps in the updated card.
 document.addEventListener("click", async (e) => {
   const btn = e.target.closest("[data-lease-action]");
   if (!btn) return;
@@ -595,15 +636,46 @@ document.addEventListener("click", async (e) => {
   const leaseId = wrapper.dataset.leaseCard;
   const action = btn.dataset.leaseAction;
   const field = btn.dataset.field;
+  const lease = JSON.parse(wrapper.dataset.lease);
+  const rowSelector = field ? `[data-field-row="${CSS.escape(field)}"]` : null;
+
+  if (action === "edit" || action === "cancel-edit") {
+    const row = wrapper.querySelector(rowSelector);
+    const editing = action === "edit";
+    row.outerHTML = renderLeaseFieldRow(lease, field, lease.status === "draft", editing);
+    if (editing) {
+      const input = wrapper.querySelector(`${rowSelector} [data-edit-input]`);
+      input.focus();
+      input.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          wrapper.querySelector(`${rowSelector} [data-lease-action="save-edit"]`).click();
+        } else if (ev.key === "Escape") {
+          wrapper.querySelector(`${rowSelector} [data-lease-action="cancel-edit"]`).click();
+        }
+      });
+    }
+    return;
+  }
 
   let payload;
   if (action === "finalize") {
+    if (btn.disabled) return;
     payload = { field_actions: [], finalize: true };
-  } else if (action === "edit") {
-    const newValue = promptForEdit(field, btn.dataset.currentValue);
-    if (newValue === undefined) return; // cancelled
+  } else if (action === "accept-all") {
+    const pendingFields = Object.entries(lease.review_status)
+      .filter(([, state]) => state === "pending")
+      .map(([key]) => key);
+    payload = { field_actions: pendingFields.map(f => ({ field_name: f, action: "accept" })) };
+  } else if (action === "save-edit") {
+    const type = LEASE_FIELD_TYPES[field] || "text";
+    const inputEl = wrapper.querySelector(`${rowSelector} [data-edit-input]`);
+    let newValue = inputEl.value;
+    if (type === "boolean") newValue = newValue === "true";
+    else if (type === "number") newValue = newValue === "" ? null : Number(newValue);
     payload = { field_actions: [{ field_name: field, action: "edit", new_value: newValue }] };
   } else {
+    // accept / reject
     payload = { field_actions: [{ field_name: field, action }] };
   }
 
