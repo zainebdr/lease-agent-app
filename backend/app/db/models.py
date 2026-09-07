@@ -25,7 +25,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship, declarative_mixin
 
 from app.db.base import Base
-from app.db.enums import UnitStatus, LeaseStatus, RuleResult
+from app.db.enums import UnitStatus, LeaseStatus, RuleResult, IssueStatus, WorkOrderStatus
 
 
 def _utcnow() -> datetime:
@@ -60,6 +60,7 @@ class Unit(Base, TimestampMixin):
     status = _enum_column(UnitStatus, nullable=False, default=UnitStatus.AVAILABLE)
 
     leases = relationship("Lease", back_populates="unit")
+    issues = relationship("Issue", back_populates="unit")
 
 
 class Lease(Base, TimestampMixin):
@@ -113,3 +114,66 @@ class RuleCheck(Base, TimestampMixin):
     source_clause = Column(String, nullable=True)
 
     lease = relationship("Lease", back_populates="rule_checks")
+
+
+class Issue(Base, TimestampMixin):
+    """A reported property issue for a unit, built from one or more
+    photos. Aggregates the per-photo assessments in IssuePhoto into a
+    single condition/contents picture, and owns the one draft WorkOrder
+    generated from it. FK'd to Unit directly (not through Lease) because
+    an issue is about the physical unit regardless of which lease, if
+    any, currently occupies it."""
+    __tablename__ = "issues"
+
+    id = Column(Integer, primary_key=True)
+    unit_id = Column(String, ForeignKey("units.unit_id"), nullable=False, index=True)
+    reported_by = Column(String, nullable=True)  # free text, e.g. "tenant" | "inspector"
+
+    condition_summary = Column(String, nullable=True)
+    contents_summary = Column(JSON, default=list)  # e.g. ["AC unit", "water heater"]
+    status = _enum_column(IssueStatus, nullable=False, default=IssueStatus.OPEN, index=True)
+
+    unit = relationship("Unit", back_populates="issues")
+    photos = relationship("IssuePhoto", back_populates="issue", cascade="all, delete-orphan")
+    work_order = relationship(
+        "WorkOrder", back_populates="issue", uselist=False, cascade="all, delete-orphan"
+    )
+
+
+class IssuePhoto(Base, TimestampMixin):
+    """One uploaded photo and its own assessment - kept as its own row
+    (rather than a list inside Issue) for the same reason RuleCheck is
+    its own table: each AI-produced result needs to stay individually
+    traceable back to the specific input (and assessor) that produced
+    it, not folded into an opaque blob."""
+    __tablename__ = "issue_photos"
+
+    id = Column(Integer, primary_key=True)
+    issue_id = Column(Integer, ForeignKey("issues.id"), nullable=False, index=True)
+    file_path = Column(String, nullable=False)
+
+    condition_assessment = Column(String, nullable=True)   # e.g. "worn, visible water damage"
+    contents_detected = Column(JSON, default=list)          # ["AC unit", "water heater"]
+    damage_notes = Column(String, nullable=True)
+    confidence = Column(Float, nullable=True)
+    assessed_by = Column(String, nullable=True)  # "mock" or the real model id used
+
+    issue = relationship("Issue", back_populates="photos")
+
+
+class WorkOrder(Base, TimestampMixin):
+    """The draft work order generated from an Issue. 1:1 with Issue in
+    this build (one report -> one draft) - reviewed as a whole (accept /
+    reject / edit-then-accept), unlike Lease's per-field review, because
+    the brief asks for each *draft work order* to be accepted or
+    rejected, not each of its fields individually."""
+    __tablename__ = "work_orders"
+
+    id = Column(Integer, primary_key=True)
+    issue_id = Column(Integer, ForeignKey("issues.id"), nullable=False, unique=True, index=True)
+
+    title = Column(String, nullable=False)
+    description = Column(String, nullable=False)
+    status = _enum_column(WorkOrderStatus, nullable=False, default=WorkOrderStatus.DRAFT, index=True)
+
+    issue = relationship("Issue", back_populates="work_order")
