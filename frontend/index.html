@@ -99,6 +99,11 @@
   }
   button.primary:hover { background: var(--accent-hover); }
   button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.danger {
+    background: var(--fail-bg); color: var(--fail); border: 1px solid var(--fail);
+    padding: 8px 16px; border-radius: 6px; cursor: pointer; font-size: 14px;
+  }
+  button.danger:hover { opacity: 0.85; }
   .error-banner {
     background: var(--fail-bg); color: var(--fail); border-radius: 6px;
     padding: 10px 12px; font-size: 13px; margin-bottom: 12px;
@@ -216,11 +221,26 @@ async function api(path, opts = {}) {
     let detail = res.statusText;
     try {
       const body = await res.json();
-      detail = body.detail || JSON.stringify(body);
+      detail = formatApiErrorDetail(body.detail) || JSON.stringify(body);
     } catch (_) { /* response wasn't JSON - keep statusText */ }
     throw new Error(`${res.status}: ${detail}`);
   }
   return res.json();
+}
+
+// FastAPI's own HTTPException(...) sends detail as a plain string, but a
+// Pydantic validation failure (422 - e.g. our FIELD_VALIDATORS rejecting
+// an edited value) sends detail as a list of {loc, msg, ...} objects.
+// Without unpacking that shape, an edit error would render as an
+// unreadable "[object Object]" instead of the actual message.
+function formatApiErrorDetail(detail) {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    return detail
+      .map((e) => (e && typeof e === "object" && e.msg) ? e.msg : JSON.stringify(e))
+      .join("; ");
+  }
+  return null;
 }
 
 function showError(containerId, err) {
@@ -474,6 +494,7 @@ function renderLeaseCard(lease) {
         <div class="field-actions" style="margin-top:12px;">
           ${pendingCount > 0 ? `<button type="button" data-lease-action="accept-all">Accept all pending (${pendingCount})</button>` : ""}
           <button type="button" class="primary" data-lease-action="finalize" ${pendingCount > 0 ? "disabled" : ""} ${pendingCount > 0 ? `title="Resolve all ${pendingCount} pending field(s) first"` : ""}>Finalize</button>
+          <button type="button" class="danger" data-lease-action="reject-lease">Reject lease</button>
         </div>
         ${pendingCount > 0 ? `<div class="field-meta" style="margin-top:6px;">${pendingCount} field(s) still pending - accept, reject, or edit them (or use "Accept all pending") before you can finalize.</div>` : ""}
       ` : ""}
@@ -659,7 +680,10 @@ document.addEventListener("click", async (e) => {
   }
 
   let payload;
-  if (action === "finalize") {
+  if (action === "reject-lease") {
+    if (!window.confirm("Reject this entire lease? This cannot be undone from here.")) return;
+    payload = { action: "reject" };
+  } else if (action === "finalize") {
     if (btn.disabled) return;
     payload = { field_actions: [], finalize: true };
   } else if (action === "accept-all") {
