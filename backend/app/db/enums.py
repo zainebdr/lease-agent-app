@@ -51,3 +51,16 @@ class WorkOrderStatus(str, enum.Enum):
     DRAFT = "draft"
     ACCEPTED = "accepted"
     REJECTED = "rejected"
+
+
+class PhotoProcessingStatus(str, enum.Enum):
+    """Whether the AI assessment step for this one photo actually
+    succeeded. A single photo's AI call raising (a provider timeout, a
+    malformed response that fails PhotoAssessmentPayload validation, ...)
+    should never sink the rest of the upload - see
+    app/services/issue_reporting.py:process_issue_report - but the photo
+    still needs a visible marker that its condition_assessment is a
+    placeholder, not a real assessment, so a human knows to look at it
+    directly instead of trusting the summary."""
+    PROCESSED = "processed"
+    FAILED = "failed"

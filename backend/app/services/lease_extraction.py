@@ -7,7 +7,7 @@ RQ) if real LLM calls made it too slow for a synchronous request — it
 doesn't know or care whether it's called from a route handler directly
 or from a task queue.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -54,6 +54,8 @@ def process_lease_upload(db: Session, document_text: str, source_document_name: 
         deposit_amount=val("deposit_amount"),
         escalation_clause_text=val("escalation_clause_text"),
         escalation_is_defined=val("escalation_is_defined"),
+        renewal_terms_text=val("renewal_terms_text"),
+        termination_terms_text=val("termination_terms_text"),
         extracted_fields={k: v.to_dict() for k, v in extracted.items()},
         review_status={k: ReviewState.PENDING.value for k in extracted.keys()},
         status=LeaseStatus.DRAFT,
@@ -76,8 +78,8 @@ def rule_engine_row(lease_id: int, result: dict):
 
 def refresh_rule_checks(db: Session, lease: Lease) -> None:
     """Re-run the rule engine against whatever the lease's fields hold
-    right now, and replace its persisted RuleCheck rows with the fresh
-    result.
+    right now, and record the fresh result alongside - not in place of -
+    whatever was there before.
 
     Called after every review action that can change a lease's field
     values (an "edit"), so a displayed PASS/FAIL always describes the
@@ -86,9 +88,20 @@ def refresh_rule_checks(db: Session, lease: Lease) -> None:
     something changed") - that keeps this correct without the caller
     having to track edit state separately, and re-running 7 in-memory
     checks is cheap enough that it isn't worth the bookkeeping to skip.
-    Does not commit - the caller controls the transaction boundary.
+
+    Previously this deleted and recreated every RuleCheck row on each
+    call, which destroyed the exact history ("this was FAIL, then a
+    human edited the deposit and it went PASS") the traceability pitch
+    depends on. Existing current rows are now marked superseded instead
+    of deleted; see app/db/models.py:Lease.rule_checks (current only)
+    vs. rule_check_history (everything). Does not commit - the caller
+    controls the transaction boundary.
     """
     unit = db.get(Unit, lease.unit_id) if lease.unit_id else None
-    db.query(RuleCheck).filter(RuleCheck.lease_id == lease.id).delete()
+    now = datetime.now(timezone.utc)
+    for existing in lease._rule_check_rows:
+        if existing.is_current:
+            existing.is_current = False
+            existing.superseded_at = now
     for result in rule_engine.run_all_checks(lease, unit):
         db.add(rule_engine_row(lease.id, result))

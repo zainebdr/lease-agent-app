@@ -1,4 +1,7 @@
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.base import get_db
@@ -6,6 +9,11 @@ from app.db.enums import LeaseStatus, ReviewState, UnitStatus
 from app.db.models import Lease, Unit
 from app.schemas.lease import LeaseOut, LeaseReviewRequest
 from app.services import lease_extraction
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 router = APIRouter(prefix="/leases", tags=["leases"])
 
@@ -18,7 +26,45 @@ EDITABLE_LEASE_FIELDS = {
     "commencement_date", "expiry_date", "term_months",
     "monthly_rent", "annual_rent", "deposit_amount",
     "escalation_clause_text", "escalation_is_defined",
+    "renewal_terms_text", "termination_terms_text",
 }
+
+
+def _reject_if_unit_already_leased(db: Session, lease: Lease) -> None:
+    """Raises 409 if some *other* lease already holds this unit as
+    'accepted'. Belt-and-braces alongside the DB-level partial unique
+    index (app/db/models.py:Lease.__table_args__) - that index is what
+    actually prevents two accepted leases on one unit even under a race,
+    but it would only surface here as an opaque IntegrityError on
+    commit; this check exists so the common (non-racing) case gets a
+    clear, specific 409 instead."""
+    if not lease.unit_id:
+        return
+    existing = (
+        db.query(Lease)
+        .filter(
+            Lease.unit_id == lease.unit_id,
+            Lease.status == LeaseStatus.ACCEPTED,
+            Lease.id != lease.id,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            409,
+            f"Unit '{lease.unit_id}' already has an accepted lease (lease {existing.id}). "
+            "Reject or otherwise resolve the existing lease before accepting this one.",
+        )
+
+
+def _require_reviewer(review: LeaseReviewRequest) -> str:
+    if not review.reviewed_by or not review.reviewed_by.strip():
+        raise HTTPException(
+            400,
+            "'reviewed_by' is required to accept or reject a lease - who made this "
+            "decision must be recorded.",
+        )
+    return review.reviewed_by
 
 
 @router.post("/upload", response_model=LeaseOut)
@@ -65,6 +111,8 @@ def review_lease(lease_id: int, review: LeaseReviewRequest, db: Session = Depend
     # or rejected as a whole rather than field by field.
     if review.action == "reject":
         lease.status = LeaseStatus.REJECTED
+        lease.reviewed_by = _require_reviewer(review)
+        lease.decision_at = _utcnow()
         db.commit()
         db.refresh(lease)
         return lease
@@ -106,6 +154,8 @@ def review_lease(lease_id: int, review: LeaseReviewRequest, db: Session = Depend
     if review.finalize:
         if ReviewState.REJECTED.value in review_status.values():
             lease.status = LeaseStatus.REJECTED
+            lease.reviewed_by = _require_reviewer(review)
+            lease.decision_at = _utcnow()
         elif ReviewState.PENDING.value in review_status.values():
             # Every field must be explicitly accepted/rejected/edited
             # before a lease can be finalized - a field nobody has looked
@@ -116,12 +166,28 @@ def review_lease(lease_id: int, review: LeaseReviewRequest, db: Session = Depend
                 "Accept, reject, or edit every field before finalizing.",
             )
         else:
+            _reject_if_unit_already_leased(db, lease)
             lease.status = LeaseStatus.ACCEPTED
+            lease.reviewed_by = _require_reviewer(review)
+            lease.decision_at = _utcnow()
             if lease.unit_id:
                 unit = db.get(Unit, lease.unit_id)
                 if unit:
                     unit.status = UnitStatus.OCCUPIED
 
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Defense in depth against the _reject_if_unit_already_leased
+        # check above racing with a concurrent accept on the same unit -
+        # the partial unique index on Lease (app/db/models.py) is the
+        # actual guarantee; this just turns a raw IntegrityError into a
+        # clear 409 instead of a 500.
+        db.rollback()
+        raise HTTPException(
+            409,
+            f"Unit '{lease.unit_id}' already has an accepted lease. "
+            "Reject or otherwise resolve the existing lease before accepting this one.",
+        )
     db.refresh(lease)
     return lease

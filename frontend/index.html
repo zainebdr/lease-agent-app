@@ -121,6 +121,11 @@
     <button data-view="upload-lease-view">Upload Lease</button>
     <button data-view="report-issue-view">Report Issue</button>
   </nav>
+  <div style="margin-left:auto; display:flex; align-items:center; gap:6px;">
+    <label for="reviewer-name" class="muted" style="font-size:13px;">Reviewing as</label>
+    <input id="reviewer-name" type="text" placeholder="you@example.com"
+           style="font-size:13px; padding:4px 8px; border:1px solid var(--border); border-radius:6px; width:170px;">
+  </div>
 </header>
 
 <main>
@@ -188,6 +193,32 @@ const API_BASE = "http://localhost:8000";
 // first thing to replace with something real if this grew past that.
 // ---------------------------------------------------------------------
 let currentUnitId = null;
+
+// ---------------------------------------------------------------------
+// Reviewer identity - every decision the API actually records (accept/
+// reject a work order, finalize or reject a lease) requires a
+// `reviewed_by` string (see app/api/leases.py and app/api/issues.py):
+// this build has no login, so this one header field is where that
+// identity comes from. Remembered in localStorage purely as a
+// convenience so it survives a page reload; nothing here is sent
+// anywhere except as the reviewed_by value on an actual review call.
+// ---------------------------------------------------------------------
+const REVIEWER_STORAGE_KEY = "leaseAgent.reviewerName";
+const reviewerInput = document.getElementById("reviewer-name");
+try {
+  reviewerInput.value = localStorage.getItem(REVIEWER_STORAGE_KEY) || "";
+} catch (_) { /* localStorage unavailable (private mode, etc.) - fine, just won't persist */ }
+
+function requireReviewerName() {
+  const name = reviewerInput.value.trim();
+  if (!name) {
+    reviewerInput.focus();
+    alert("Enter who's reviewing (top right) before accepting or rejecting - it's recorded with the decision.");
+    return null;
+  }
+  try { localStorage.setItem(REVIEWER_STORAGE_KEY, name); } catch (_) { /* fine, non-essential */ }
+  return name;
+}
 
 function showView(id) {
   document.querySelectorAll(".view").forEach(v => v.hidden = (v.id !== id));
@@ -386,6 +417,7 @@ const EDITABLE_LEASE_FIELDS = new Set([
   "commencement_date", "expiry_date", "term_months",
   "monthly_rent", "annual_rent", "deposit_amount",
   "escalation_clause_text", "escalation_is_defined",
+  "renewal_terms_text", "termination_terms_text",
 ]);
 
 // Used only client-side, to send edit values as the right JSON type
@@ -497,7 +529,9 @@ function renderLeaseCard(lease) {
           <button type="button" class="danger" data-lease-action="reject-lease">Reject lease</button>
         </div>
         ${pendingCount > 0 ? `<div class="field-meta" style="margin-top:6px;">${pendingCount} field(s) still pending - accept, reject, or edit them (or use "Accept all pending") before you can finalize.</div>` : ""}
-      ` : ""}
+      ` : `
+        ${lease.reviewed_by ? `<div class="field-meta" style="margin-top:6px;">Decided by ${escapeHtml(lease.reviewed_by)}${lease.decision_at ? ` on ${escapeHtml(new Date(lease.decision_at).toLocaleString())}` : ""}</div>` : ""}
+      `}
     </div>
   `;
 }
@@ -518,9 +552,12 @@ function renderIssueCard(issue) {
       <img class="photo-thumb" src="${API_BASE}/uploads/${encodeURIComponent(p.file_path)}"
            alt="${escapeAttr(p.file_path)}" onerror="this.style.display='none'">
       <span class="field-value">
-        <div>${escapeHtml(p.condition_assessment || "-")}</div>
+        <div>${escapeHtml(p.condition_assessment || "-")}
+          ${p.duplicate_of_id != null ? `<span class="badge badge-warn" title="Same photo content as photo #${p.duplicate_of_id} - stored once, flagged here rather than rejected, since the same photo can legitimately apply to more than one issue.">Duplicate of #${p.duplicate_of_id}</span>` : ""}
+          ${p.processing_status === "failed" ? `<span class="badge badge-fail" title="The AI assessment call for this photo failed - the condition/contents above are a placeholder, not a real assessment. Review this photo directly.">Assessment failed</span>` : ""}
+        </div>
         <div class="field-meta">
-          contents: ${escapeHtml((p.contents_detected || []).join(", ") || "none noted")}
+          ${p.original_filename ? `${escapeHtml(p.original_filename)} &middot; ` : ""}contents: ${escapeHtml((p.contents_detected || []).join(", ") || "none noted")}
           ${p.damage_notes ? ` &middot; ${escapeHtml(p.damage_notes)}` : ""}
           &middot; confidence ${p.confidence != null ? Number(p.confidence).toFixed(2) : "-"}
           &middot; assessed by ${escapeHtml(p.assessed_by || "-")}
@@ -540,7 +577,9 @@ function renderIssueCard(issue) {
         <button type="button" class="primary" data-issue-action="accept">Accept</button>
         <button type="button" data-issue-action="reject">Reject</button>
       </div>
-    ` : ""}
+    ` : `
+      ${wo.reviewed_by ? `<div class="field-meta">Decided by ${escapeHtml(wo.reviewed_by)}${wo.decision_at ? ` on ${escapeHtml(new Date(wo.decision_at).toLocaleString())}` : ""}</div>` : ""}
+    `}
   ` : `<div class="empty-state">No work order drafted.</div>`;
 
   return `
@@ -579,7 +618,9 @@ document.addEventListener("click", async (e) => {
 
   let payload = {};
   if (action === "accept" || action === "reject") {
-    payload = { action };
+    const reviewedBy = requireReviewerName();
+    if (!reviewedBy) return;
+    payload = { action, reviewed_by: reviewedBy };
   } else if (action === "edit-title") {
     const newTitle = window.prompt("New title:", btn.dataset.currentTitle ?? "");
     if (newTitle === null) return;
@@ -682,10 +723,14 @@ document.addEventListener("click", async (e) => {
   let payload;
   if (action === "reject-lease") {
     if (!window.confirm("Reject this entire lease? This cannot be undone from here.")) return;
-    payload = { action: "reject" };
+    const reviewedBy = requireReviewerName();
+    if (!reviewedBy) return;
+    payload = { action: "reject", reviewed_by: reviewedBy };
   } else if (action === "finalize") {
     if (btn.disabled) return;
-    payload = { field_actions: [], finalize: true };
+    const reviewedBy = requireReviewerName();
+    if (!reviewedBy) return;
+    payload = { field_actions: [], finalize: true, reviewed_by: reviewedBy };
   } else if (action === "accept-all") {
     const pendingFields = Object.entries(lease.review_status)
       .filter(([, state]) => state === "pending")

@@ -16,16 +16,54 @@ Design notes:
 - Every table gets created_at/updated_at via TimestampMixin. This
   product's whole pitch is traceability and review; not being able to
   say when a lease was uploaded or a field last touched undercuts that.
+- `reviewed_by`/`decision_at` on Lease and WorkOrder record *who* made
+  the accept/reject decision and *when* - schema changes only, since
+  this build has no auth system to source an identity from; the review
+  request bodies (app/schemas/lease.py, app/schemas/issue.py) now accept
+  a caller-supplied `reviewed_by` string that a real deployment would
+  instead populate from an authenticated session.
+- RuleCheck rows are never deleted. `refresh_rule_checks` used to wipe
+  and recreate them on every review call, destroying the exact history
+  ("this was FAIL, then a human edited the deposit and it went PASS")
+  the traceability pitch depends on. Old rows are now marked superseded
+  (`is_current=False`, `superseded_at` set) instead of deleted; only
+  `Lease.rule_checks` (the current set) is exposed by the main API
+  response, while `Lease.rule_check_history` returns every row ever
+  produced, in order.
+- Schema changes here are managed with Alembic (see backend/alembic/) -
+  a bare `Base.metadata.create_all()` only creates tables that don't
+  exist yet, so it silently does nothing for a column added to a table
+  that's already there. Without a migration tool, every column added
+  after someone's `app.db` already exists (exactly what's happening in
+  this change - `reviewed_by`, `decision_at`, `is_current`,
+  `superseded_at`, `sha256`, `size_bytes`, `content_type`) would just be
+  missing from their database with no error until first used.
+- `IssuePhoto.duplicate_of_id` flags a content-hash match against an
+  earlier photo (see app/services/issue_reporting.py) without changing
+  upload behavior at all - the duplicate is still stored and assessed
+  as normal, this just makes the relationship visible. Deliberately
+  automatic/silent rather than asking a human to confirm the reuse at
+  upload time (the same photo can legitimately apply to more than one
+  issue) - see the README for the "should this ever block or prompt
+  instead" open question.
 """
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    Column, Integer, String, Float, Boolean, Date, DateTime, ForeignKey, JSON, Enum
+    Column, Integer, String, Float, Boolean, Date, DateTime, ForeignKey, JSON, Enum,
+    Index, text, true,
 )
 from sqlalchemy.orm import relationship, declarative_mixin
 
 from app.db.base import Base
-from app.db.enums import UnitStatus, LeaseStatus, RuleResult, IssueStatus, WorkOrderStatus
+from app.db.enums import (
+    UnitStatus,
+    LeaseStatus,
+    RuleResult,
+    IssueStatus,
+    WorkOrderStatus,
+    PhotoProcessingStatus,
+)
 
 
 def _utcnow() -> datetime:
@@ -86,6 +124,9 @@ class Lease(Base, TimestampMixin):
     escalation_clause_text = Column(String, nullable=True)
     escalation_is_defined = Column(Boolean, nullable=True)
 
+    renewal_terms_text = Column(String, nullable=True)
+    termination_terms_text = Column(String, nullable=True)
+
     # {field_name: {"value": ..., "source_span": "...", "confidence": 0.0-1.0}}
     extracted_fields = Column(JSON, default=dict)
     # {field_name: "pending" | "accepted" | "rejected" | "edited"} — see
@@ -95,9 +136,61 @@ class Lease(Base, TimestampMixin):
 
     status = _enum_column(LeaseStatus, nullable=False, default=LeaseStatus.DRAFT, index=True)
 
+    # Who decided this lease's fate (accept/reject) and when. No auth
+    # system exists in this build to source an identity from, so this is
+    # whatever string the review request supplied - see
+    # app/schemas/lease.py:LeaseReviewRequest.reviewed_by. Left nullable
+    # so pre-existing rows (and a whole-lease action taken before this
+    # column existed) don't need a backfill value; app/api/leases.py
+    # always sets both together whenever status leaves DRAFT.
+    reviewed_by = Column(String, nullable=True)
+    decision_at = Column(DateTime, nullable=True)
+
     unit = relationship("Unit", back_populates="leases")
-    rule_checks = relationship(
-        "RuleCheck", back_populates="lease", cascade="all, delete-orphan"
+
+    # Full history of every RuleCheck row ever produced for this lease,
+    # oldest first - never filtered, never deleted. `rule_checks` below
+    # (what the API actually serializes) is the "is_current" subset of
+    # this same collection.
+    _rule_check_rows = relationship(
+        "RuleCheck",
+        back_populates="lease",
+        cascade="all, delete-orphan",
+        order_by="RuleCheck.id",
+    )
+
+    @property
+    def rule_checks(self) -> list["RuleCheck"]:
+        """The current rule-check result per rule - what
+        app/schemas/lease.py:LeaseOut serializes. Superseded rows are
+        deliberately excluded here so a reviewer sees one row per rule,
+        not the whole history mixed in; use `rule_check_history` for
+        the full audit trail."""
+        return [rc for rc in self._rule_check_rows if rc.is_current]
+
+    @property
+    def rule_check_history(self) -> list["RuleCheck"]:
+        """Every RuleCheck row this lease has ever had, oldest first -
+        the record that shows a field being edited flipped a rule from
+        FAIL to PASS, which `rule_checks` alone can't show once a
+        newer, current row exists for the same rule_id."""
+        return list(self._rule_check_rows)
+
+    __table_args__ = (
+        # A unit can have at most one *accepted* lease at a time - two
+        # accepted leases on the same unit means double-booking it.
+        # This is a partial unique index (only rows where status =
+        # 'accepted' participate) rather than a plain unique constraint
+        # on unit_id, since a unit legitimately accumulates many DRAFT/
+        # REJECTED leases over time (renewals, applications that didn't
+        # go through, ...) - only "accepted" is exclusive.
+        Index(
+            "uq_leases_one_accepted_per_unit",
+            "unit_id",
+            unique=True,
+            sqlite_where=text("status = 'accepted'"),
+            postgresql_where=text("status = 'accepted'"),
+        ),
     )
 
 
@@ -113,7 +206,18 @@ class RuleCheck(Base, TimestampMixin):
     reason = Column(String, nullable=True)
     source_clause = Column(String, nullable=True)
 
-    lease = relationship("Lease", back_populates="rule_checks")
+    # False once a later re-run of the rule engine (app/services/
+    # lease_extraction.py:refresh_rule_checks) has produced a newer row
+    # for the same rule_id on the same lease. The row itself is never
+    # deleted or overwritten - this is what keeps the history intact.
+    is_current = Column(Boolean, nullable=False, default=True, server_default=true())
+    superseded_at = Column(DateTime, nullable=True)
+
+    lease = relationship("Lease", back_populates="_rule_check_rows")
+
+    __table_args__ = (
+        Index("ix_rule_checks_lease_id_is_current", "lease_id", "is_current"),
+    )
 
 
 class Issue(Base, TimestampMixin):
@@ -152,13 +256,57 @@ class IssuePhoto(Base, TimestampMixin):
     issue_id = Column(Integer, ForeignKey("issues.id"), nullable=False, index=True)
     file_path = Column(String, nullable=False)
 
+    # The name the uploader's browser/OS sent - kept purely for display
+    # ("your photo 'IMG_4021.jpg'") and never used to build file_path,
+    # which is content-addressed (see _save_photo) precisely so a
+    # attacker- or accident-controlled filename never reaches the
+    # filesystem. Nullable for the same pre-existing-row reason as the
+    # sha256/size_bytes/content_type fields below.
+    original_filename = Column(String, nullable=True)
+
+    # Content-addressing/integrity fields for the stored upload. Nullable
+    # because a pre-existing row from before this column existed has no
+    # way to retroactively compute these without re-reading a file that
+    # may itself predate the migration; every row created going forward
+    # (app/services/issue_reporting.py) always sets all three.
+    sha256 = Column(String(64), nullable=True, index=True)
+    size_bytes = Column(Integer, nullable=True)
+    content_type = Column(String, nullable=True)
+
+    # Set when this upload's sha256 matches an earlier IssuePhoto row -
+    # points at the *earliest* such row (see app/services/
+    # issue_reporting.py:process_issue_report), so a photo re-uploaded
+    # many times always resolves back to one original, never a chain of
+    # duplicates-of-duplicates. This does not change upload behavior at
+    # all - a duplicate is still stored (well, its metadata row is;
+    # _save_photo's content-addressed storage means the file itself
+    # isn't re-written to disk) and assessed exactly like any other
+    # photo - it only makes the "this is the same photo as #12" fact
+    # visible instead of something you'd have to notice by comparing
+    # sha256 values by hand. NULL means "not a known duplicate", not
+    # "definitely unique" - it's only ever compared against photos
+    # already in this database.
+    duplicate_of_id = Column(Integer, ForeignKey("issue_photos.id"), nullable=True, index=True)
+
     condition_assessment = Column(String, nullable=True)   # e.g. "worn, visible water damage"
     contents_detected = Column(JSON, default=list)          # ["AC unit", "water heater"]
     damage_notes = Column(String, nullable=True)
     confidence = Column(Float, nullable=True)
     assessed_by = Column(String, nullable=True)  # "mock" or the real model id used
 
+    # Whether the AI assessment above is real or a placeholder. A single
+    # photo's assessor call can fail (provider error, or a response that
+    # fails PhotoAssessmentPayload validation) without failing the whole
+    # upload - see app/services/issue_reporting.py:process_issue_report -
+    # so this is what tells a human "the condition_assessment on this one
+    # photo is a stand-in, go look at the photo yourself" instead of
+    # quietly presenting a placeholder as if it were a real assessment.
+    # Nullable for the same pre-existing-row reason as the fields above;
+    # every row created going forward always sets it.
+    processing_status = _enum_column(PhotoProcessingStatus, nullable=True)
+
     issue = relationship("Issue", back_populates="photos")
+    duplicate_of = relationship("IssuePhoto", remote_side=[id], foreign_keys=[duplicate_of_id])
 
 
 class WorkOrder(Base, TimestampMixin):
@@ -175,5 +323,10 @@ class WorkOrder(Base, TimestampMixin):
     title = Column(String, nullable=False)
     description = Column(String, nullable=False)
     status = _enum_column(WorkOrderStatus, nullable=False, default=WorkOrderStatus.DRAFT, index=True)
+
+    # Same reasoning as Lease.reviewed_by/decision_at above - who
+    # accepted or rejected this work order, and when.
+    reviewed_by = Column(String, nullable=True)
+    decision_at = Column(DateTime, nullable=True)
 
     issue = relationship("Issue", back_populates="work_order")

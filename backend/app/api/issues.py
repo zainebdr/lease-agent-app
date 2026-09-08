@@ -1,8 +1,12 @@
+import io
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, UploadFile, File, Form, HTTPException
+from PIL import Image, UnidentifiedImageError
 from sqlalchemy.orm import Session
 
+from app.config import MAX_PHOTO_SIZE_BYTES
 from app.db.base import get_db
 from app.db.enums import IssueStatus, WorkOrderStatus
 from app.db.models import Issue
@@ -10,6 +14,50 @@ from app.schemas.issue import IssueOut, WorkOrderReviewRequest
 from app.services import issue_reporting
 
 router = APIRouter(prefix="/issues", tags=["issues"])
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _require_reviewer(review: WorkOrderReviewRequest) -> str:
+    if not review.reviewed_by or not review.reviewed_by.strip():
+        raise HTTPException(
+            400,
+            "'reviewed_by' is required to accept or reject a work order - who made "
+            "this decision must be recorded.",
+        )
+    return review.reviewed_by
+
+
+def _validate_photo_upload(filename: str, content: bytes) -> None:
+    """Raises 400 unless `content` is a genuinely decodable image within
+    the size limit.
+
+    A client-supplied Content-Type header is never trusted for this - a
+    renamed .txt file can claim to be "image/jpeg" just as easily as a
+    real photo can - so this actually opens the bytes with Pillow and
+    lets it verify them, the same way any real image consumer would.
+    Deliberately runs before anything else in the pipeline (hashing,
+    storage, the AI call): there's no reason to spend an AI call, disk
+    space, or a stored sha256 on bytes that were never a photo to begin
+    with.
+
+    Image.verify() is a structural check (catches truncated/corrupt
+    files and non-image bytes) rather than a full pixel decode - fine
+    for this purpose, and cheaper than fully decoding every upload.
+    """
+    if len(content) > MAX_PHOTO_SIZE_BYTES:
+        raise HTTPException(
+            400,
+            f"'{filename}' is {len(content)} bytes, over the "
+            f"{MAX_PHOTO_SIZE_BYTES // (1024 * 1024)}MB limit per photo.",
+        )
+    try:
+        with Image.open(io.BytesIO(content)) as img:
+            img.verify()
+    except (UnidentifiedImageError, OSError, ValueError):
+        raise HTTPException(400, f"'{filename}' is not a valid image file.")
 
 
 @router.post("/upload", response_model=IssueOut)
@@ -22,7 +70,11 @@ def upload_issue(
     if not files:
         raise HTTPException(400, "At least one photo is required.")
 
-    photo_files = [(f.filename, f.file.read()) for f in files]
+    photo_files = []
+    for f in files:
+        content = f.file.read()
+        _validate_photo_upload(f.filename, content)
+        photo_files.append((f.filename, content, f.content_type))
 
     try:
         issue = issue_reporting.process_issue_report(db, unit_id, photo_files, reported_by)
@@ -71,6 +123,8 @@ def review_work_order(issue_id: int, review: WorkOrderReviewRequest, db: Session
 
     if review.action == "accept":
         work_order.status = WorkOrderStatus.ACCEPTED
+        work_order.reviewed_by = _require_reviewer(review)
+        work_order.decision_at = _utcnow()
         # Accepting the draft is what turns a reported issue into
         # something actually being worked - the issue itself moves from
         # "open" (reported, nothing approved yet) to "in_progress".
@@ -80,6 +134,8 @@ def review_work_order(issue_id: int, review: WorkOrderReviewRequest, db: Session
         issue.status = IssueStatus.IN_PROGRESS
     elif review.action == "reject":
         work_order.status = WorkOrderStatus.REJECTED
+        work_order.reviewed_by = _require_reviewer(review)
+        work_order.decision_at = _utcnow()
         # Rejecting the draft doesn't resolve or dismiss the underlying
         # issue - the property problem the photos showed is still there,
         # it just means this drafted work order wasn't right. The issue

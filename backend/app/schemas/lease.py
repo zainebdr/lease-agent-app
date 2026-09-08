@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Optional, Any
 
 from pydantic import BaseModel, model_validator
@@ -11,6 +11,12 @@ class RuleCheckOut(BaseModel):
     result: str
     reason: Optional[str] = None
     source_clause: Optional[str] = None
+    # Included so a client can tell current results (is_current=True,
+    # superseded_at=None) apart from entries returned in
+    # LeaseOut.rule_check_history that a later review call superseded.
+    is_current: bool = True
+    created_at: Optional[datetime] = None
+    superseded_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -37,11 +43,24 @@ class LeaseOut(BaseModel):
     escalation_clause_text: Optional[str] = None
     escalation_is_defined: Optional[bool] = None
 
+    renewal_terms_text: Optional[str] = None
+    termination_terms_text: Optional[str] = None
+
     extracted_fields: dict[str, Any] = {}
     review_status: dict[str, str] = {}
     status: str
 
+    # Who accepted/rejected this lease and when - see
+    # app/db/models.py:Lease.reviewed_by for why these are nullable.
+    reviewed_by: Optional[str] = None
+    decision_at: Optional[datetime] = None
+
     rule_checks: list[RuleCheckOut] = []
+    # Every rule-check row this lease has ever had, including ones a
+    # later edit superseded - `rule_checks` above only ever shows the
+    # current one per rule. Empty unless the lease has been through at
+    # least one review-triggered refresh past its initial upload.
+    rule_check_history: list[RuleCheckOut] = []
 
     class Config:
         from_attributes = True
@@ -109,6 +128,8 @@ FIELD_VALIDATORS = {
     "deposit_amount": _validate_positive_number,
     "escalation_clause_text": _validate_string,
     "escalation_is_defined": _validate_bool,
+    "renewal_terms_text": _validate_string,
+    "termination_terms_text": _validate_string,
 }
 
 
@@ -140,3 +161,11 @@ class LeaseReviewRequest(BaseModel):
     field_actions: list[FieldReviewAction] = []
     finalize: bool = False   # if true and no field is rejected, marks lease accepted
                               # and flips the unit's status to "occupied"
+    # Who is making this call. This build has no auth system to pull an
+    # identity from, so the caller states it; app/api/leases.py requires
+    # it on any action that actually decides the lease (a whole-lease
+    # "reject", or a "finalize" that accepts/rejects it) so a decision
+    # is never recorded with no one attached to it. Not required for a
+    # plain per-field accept/reject/edit that doesn't finalize, since
+    # nothing has been decided yet at that point.
+    reviewed_by: Optional[str] = None

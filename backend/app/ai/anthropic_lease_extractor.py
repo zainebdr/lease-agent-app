@@ -17,7 +17,10 @@ just the mock.
 """
 import json
 
+from pydantic import ValidationError
+
 from app.ai.base import ExtractedField
+from app.ai.schemas import ExtractedFieldPayload
 from app.config import ANTHROPIC_API_KEY
 
 EXTRACTION_PROMPT = """You are extracting structured data from a lease document.
@@ -26,6 +29,7 @@ Return ONLY a JSON object (no prose, no markdown fences) with this shape:
 {{
   "landlord_name": {{"value": "...", "source_span": "short verbatim quote", "confidence": 0.0-1.0}},
   "tenant_name": {{...}},
+  "unit_reference_text": {{"value": "however the unit/apartment is identified in the document, e.g. 'Unit 1204' or 'Apt B-1204'", ...}},
   "commencement_date": {{"value": "YYYY-MM-DD", ...}},
   "expiry_date": {{"value": "YYYY-MM-DD", ...}},
   "term_months": {{"value": 12, ...}},
@@ -34,6 +38,8 @@ Return ONLY a JSON object (no prose, no markdown fences) with this shape:
   "deposit_amount": {{"value": 8500, ...}},
   "escalation_clause_text": {{"value": "...", ...}},
   "escalation_is_defined": {{"value": true, ...}},
+  "renewal_terms_text": {{"value": "how the lease may be renewed, e.g. 'automatic renewal unless either party gives 60 days notice'", ...}},
+  "termination_terms_text": {{"value": "conditions/notice required to terminate early, e.g. '90 days written notice, penalty of 2 months rent'", ...}},
   "landlord_signed": {{"value": true, ...}},
   "tenant_signed": {{"value": true, ...}}
 }}
@@ -46,8 +52,35 @@ LEASE DOCUMENT:
 ---
 """
 
+# Every key the prompt above can return. Anything else in the parsed JSON
+# (the model inventing a field, or renaming one) is dropped rather than
+# passed through - app/services/unit_matching.py and the rule engine only
+# ever look up known keys, so an extra key would just be dead weight, but
+# a *misspelled* known key (e.g. "unit_reference" instead of
+# "unit_reference_text") failing silently instead of loudly is exactly the
+# kind of thing this allowlist is meant to catch during development.
+KNOWN_FIELD_NAMES = frozenset(
+    {
+        "landlord_name",
+        "tenant_name",
+        "unit_reference_text",
+        "commencement_date",
+        "expiry_date",
+        "term_months",
+        "monthly_rent",
+        "annual_rent",
+        "deposit_amount",
+        "escalation_clause_text",
+        "escalation_is_defined",
+        "renewal_terms_text",
+        "termination_terms_text",
+        "landlord_signed",
+        "tenant_signed",
+    }
+)
 
-class LLMLeaseExtractor:
+
+class AnthropicLeaseExtractor:
     def __init__(self):
         import anthropic  # imported lazily so the package is only required
                            # when this real implementation is actually used
@@ -71,10 +104,22 @@ class LLMLeaseExtractor:
 
         fields = {}
         for key, entry in parsed.items():
-            if isinstance(entry, dict) and "value" in entry:
-                fields[key] = ExtractedField(
-                    value=entry["value"],
-                    source_span=entry.get("source_span"),
-                    confidence=float(entry.get("confidence", 0.5)),
-                )
+            if key not in KNOWN_FIELD_NAMES:
+                continue
+            try:
+                # Same reasoning as the image assessor: valid JSON doesn't
+                # mean correctly-shaped JSON - a missing "value" key or a
+                # non-numeric/out-of-range "confidence" is just as
+                # untrustworthy as the whole response failing to parse, so
+                # it's dropped the same way rather than crashing this loop
+                # (float(entry.get("confidence")) would raise on a string
+                # like "high") or silently storing a bad confidence.
+                payload = ExtractedFieldPayload.model_validate(entry)
+            except ValidationError:
+                continue
+            fields[key] = ExtractedField(
+                value=payload.value,
+                source_span=payload.source_span,
+                confidence=payload.confidence,
+            )
         return fields

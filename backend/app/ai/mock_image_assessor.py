@@ -13,9 +13,10 @@ issue-reporting flow (assess -> aggregate -> draft work order -> human
 review) can be built and tested without any external service or API
 cost. Confidence is deliberately capped at a modest value to signal
 "structural stand-in", not a real read of the image. Swapping in
-app/ai/llm_image_assessor.py (a real Claude vision call) is what turns
-this from a shape demo into an actual assessment of the photo - same
-interface, one env var, no other code changes.
+app/ai/anthropic_image_assessor.py (a real Claude vision call) or
+app/ai/openai_image_assessor.py (a real GPT-4o vision call) is what
+turns this from a shape demo into an actual assessment of the photo -
+same interface, one env var, no other code changes.
 """
 import hashlib
 

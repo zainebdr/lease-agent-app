@@ -4,7 +4,7 @@ instantiated by app/ai/factory.py when a real-AI key is configured -
 not required to run the app. Requires: pip install anthropic
 
 This build wires up Anthropic's Claude specifically (same choice as
-llm_lease_extractor.py, see app/config.py's "AI provider" section for
+anthropic_lease_extractor.py, see app/config.py's "AI provider" section for
 why), but nothing about the ImageAssessor interface or the factory
 ties the app to Anthropic - a different vision provider is a new class
 implementing the same interface plus one branch in app/ai/factory.py.
@@ -18,7 +18,10 @@ import base64
 import json
 import mimetypes
 
+from pydantic import ValidationError
+
 from app.ai.base import PhotoAssessment
+from app.ai.schemas import PhotoAssessmentPayload
 from app.config import ANTHROPIC_API_KEY
 
 ASSESSMENT_PROMPT = """You are assessing a photo of a rental property unit for a property owner.
@@ -39,7 +42,7 @@ what's seen."""
 _MODEL = "claude-sonnet-4-6"
 
 
-class LLMImageAssessor:
+class AnthropicImageAssessor:
     def __init__(self):
         import anthropic  # imported lazily so the package is only required
                            # when this real implementation is actually used
@@ -80,18 +83,39 @@ class LLMImageAssessor:
             # to produce *something* for a human to review - so a parse
             # failure becomes a clearly-labelled, zero-confidence result
             # instead of a crash or a silent empty response.
-            return PhotoAssessment(
-                condition="Could not parse model response - needs manual review.",
-                contents=[],
-                damage_notes=None,
-                confidence=0.0,
-                assessed_by=_MODEL,
-            )
+            return self._unparseable_result()
+
+        try:
+            # Valid JSON isn't the same as *correctly-shaped* JSON - e.g.
+            # "contents": "AC unit" is valid JSON but would make
+            # list(parsed["contents"]) silently iterate the string into
+            # ["A", "C", " ", "u", ...] instead of raising. Validating
+            # against the shared schema (app/ai/schemas.py) catches that
+            # the same way a parse failure is caught, rather than trusting
+            # the model's JSON to also be the right shape.
+            payload = PhotoAssessmentPayload.model_validate(parsed)
+        except ValidationError:
+            return self._unparseable_result()
 
         return PhotoAssessment(
-            condition=parsed.get("condition", "unknown"),
-            contents=list(parsed.get("contents", [])),
-            damage_notes=parsed.get("damage_notes"),
-            confidence=float(parsed.get("confidence", 0.5)),
+            condition=payload.condition,
+            contents=payload.contents,
+            damage_notes=payload.damage_notes,
+            confidence=payload.confidence,
+            assessed_by=_MODEL,
+        )
+
+    @staticmethod
+    def _unparseable_result() -> PhotoAssessment:
+        """Shared fallback for a model response that's either not valid
+        JSON at all, or valid JSON in the wrong shape - both are equally
+        untrustworthy, so both produce the same clearly-labelled,
+        zero-confidence result for a human to review instead of a crash
+        or silently-wrong data."""
+        return PhotoAssessment(
+            condition="Could not parse model response - needs manual review.",
+            contents=[],
+            damage_notes=None,
+            confidence=0.0,
             assessed_by=_MODEL,
         )

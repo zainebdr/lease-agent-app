@@ -3,7 +3,11 @@ uvicorn[standard]==0.30.6
 sqlalchemy==2.0.35
 pydantic==2.9.2
 python-multipart==0.0.12
+alembic==1.13.3
+pillow==10.4.0
 
-# Optional — only needed if you set ANTHROPIC_API_KEY to use the real
-# LLM path instead of the built-in mock:
-# anthropic==0.34.2
+# Optional — only needed to use a real LLM path instead of the built-in
+# mock (see app/config.py's "AI provider" section). Install whichever one
+# matches the API key you actually have; you only ever need one:
+# anthropic==0.34.2   # if you set ANTHROPIC_API_KEY
+# openai==1.51.0      # if you set OPENAI_API_KEY

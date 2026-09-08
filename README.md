@@ -128,57 +128,176 @@ test, and always against the deterministic mock AI implementations —
 no API key, no network access, and no effect whatsoever on your real
 `app.db`.
 
-### AI: mock vs. real
+### 4. Migrations (only if you already have an `app.db`)
 
-I built lease extraction behind an interface (`Protocol` in
-`app/ai/base.py`) with two implementations, rather than wiring straight to
-one model call:
+Schema changes are managed with [Alembic](https://alembic.sqlalchemy.org/)
+(`backend/alembic/`), not by hand-editing an existing database.
 
-- **Mock (default, always available)** — a deterministic, rule-based
-  extractor that looks for common lease phrasing (labelled lines, date
-  formats, currency amounts). No dependency on any external service, no
-  cost, no latency, runs the same way every time.
-- **Real (used automatically if configured)** — a genuine Claude call,
-  prompted to return strict JSON with a source quote and confidence per
-  field.
+**Brand-new setup, no `app.db` yet:** nothing to do — step 1 above
+(`uvicorn app.main:app --reload`) creates `app.db` with the full current
+schema on first run, same as always. Optionally tell Alembic your fresh
+database is already fully up to date, so a later `alembic upgrade head`
+is a no-op instead of erroring on tables that already exist:
+
+```bash
+cd backend
+alembic stamp head
+```
+
+**Pulled a newer version of this repo and already have an `app.db`
+from an older commit:** run `alembic upgrade head` to apply whatever
+columns changed since. If that errors because your `app.db` predates
+Alembic entirely, easiest fix is just deleting `app.db` and letting
+step 1 recreate it fresh.
+
+### AI: mock vs. real, and picking a provider
+
+I built lease extraction and photo assessment behind interfaces
+(`Protocol`s in `app/ai/base.py`) with three implementations each, rather
+than wiring straight to one model call:
+
+- **Mock (default, always available)** — for lease extraction, a
+  deterministic, rule-based extractor that looks for common lease
+  phrasing (labelled lines, date formats, currency amounts) — genuine,
+  if simple, rule-based work. For photo assessment, a deterministic
+  hash-based stand-in with a fixed set of scenarios — see
+  `app/ai/mock_image_assessor.py`'s own docstring for why that one is
+  honestly just a shape-demo, not a rules engine — there's no rule-based
+  equivalent for "judge this photo's condition" the way there is for
+  "find the rent amount in this text." No dependency on any external
+  service, no cost, no latency, runs the same way every time.
+- **Real (used automatically if a key is configured)** — a genuine
+  model call, prompted to return strict JSON with a source quote and
+  confidence per field (lease extraction) or condition/contents/damage
+  notes/confidence (photo assessment). Two providers are implemented
+  behind the exact same interface, so **whichever key you already
+  have works, with zero code changes**:
 
   ```bash
+  # Anthropic (Claude) - used if ANTHROPIC_API_KEY is set
   pip install anthropic
   export ANTHROPIC_API_KEY=sk-ant-...
+
+  # OR OpenAI (GPT-4o) - used if OPENAI_API_KEY is set instead
+  pip install openai
+  export OPENAI_API_KEY=sk-...
   ```
 
-  No other code changes needed — `app/ai/factory.py` is the single place
-  that decides which implementation to hand to the rest of the app, based
-  on whether a key is present. Part B's photo assessment
-  (`app/ai/mock_image_assessor.py` / `llm_image_assessor.py`) follows the
-  exact same pattern, behind its own `ImageAssessor` interface.
+  You only ever need one of these two — `app/config.py` resolves
+  `AI_PROVIDER` from whichever key is present (Anthropic takes
+  precedence if both happen to be set), and `app/ai/factory.py` is the
+  single place that hands the right concrete implementation to the rest
+  of the app based on that. No other code changes needed either way.
+  `app/ai/anthropic_lease_extractor.py` / `anthropic_image_assessor.py`
+  are the Anthropic implementations; `app/ai/openai_lease_extractor.py` /
+  `openai_image_assessor.py` are the OpenAI ones. Both providers are
+  handed the *exact same prompts* (the OpenAI files import
+  `ASSESSMENT_PROMPT`/`EXTRACTION_PROMPT` from the Anthropic files
+  rather than duplicating them) and validate the parsed response against
+  the *exact same* `app/ai/schemas.py` Pydantic models — so which
+  provider answers only changes the wire format of the API call itself,
+  never the question asked or the shape enforced on the answer.
 
-**Why bother with both, instead of just calling a real model directly:**
-the actual "agent" behavior this product needs — flagging missing or
-contradictory data, validating against the ruleset, matching to a unit,
-routing everything through human accept/reject/edit — is logic that has
-nothing to do with which model produced the raw extraction. Isolating the
-raw extraction step behind an interface means I could build and fully
-exercise that validation/review pipeline (the part with the actual
-business value) without depending on an external service being up,
-costing money per test run, or being non-deterministic while I'm
-iterating. The real implementation exists and is a genuine model call,
-not a placeholder — it's just not the only path, and switching between
-them is a one-line env var, not a rewrite.
+**Why bother with mock + two real providers, instead of just calling one
+model directly:** the actual "agent" behavior this product needs —
+flagging missing or contradictory data, validating against the ruleset,
+matching to a unit, routing everything through human accept/reject/edit —
+is logic that has nothing to do with which model (or vendor) produced the
+raw extraction. Isolating that step behind an interface meant I could
+build and fully exercise that validation/review pipeline (the part with
+the actual business value) without depending on an external service
+being up, costing money per test run, or being non-deterministic while
+iterating. Supporting two real providers behind the same interface, on
+top of that, means whoever runs this doesn't need *my* API key or *my*
+choice of vendor — they use whichever one they already have. Both real
+implementations are genuine model calls, not placeholders — they're just
+not the only path, and switching between mock / Anthropic / OpenAI is
+one environment variable, never a rewrite.
 
 ## Main decisions
 
-- **SQLite + SQLAlchemy** for persistence. Zero setup for a take-home
-  reviewer to run, but the ORM means moving to Postgres later is a
-  one-line connection-string change (`app/config.py`) plus running
-  migrations — no model or query code changes. I've skipped Alembic
-  migrations in this build to keep it a zero-setup clone-and-run for a
-  reviewer; a real deployment would want them from day one.
+- **SQLite + SQLAlchemy** for persistence, with **Alembic** managing
+  schema changes (`backend/alembic/`, see "Migrations" above). The ORM
+  means moving to Postgres later is a one-line connection-string change
+  (`app/config.py`) — no model or query code changes — and Alembic
+  means a schema change (like the one that added `reviewed_by` and the
+  photo integrity columns) reaches an existing `app.db` through a
+  reviewed migration instead of silently not happening: a bare
+  `Base.metadata.create_all()` only creates tables that don't exist yet,
+  so it does nothing for a new column on a table that's already there.
+- **Renewal and termination terms are extracted fields too** —
+  `renewal_terms_text` / `termination_terms_text`, same treatment as
+  rent or the escalation clause: a source span, reviewable, editable,
+  left blank rather than guessed if the lease doesn't spell them out.
 - **Provenance and review state live in the schema, not bolted on.**
   `Lease.extracted_fields` stores each field's value, source span, and
   confidence; `Lease.review_status` tracks accepted/rejected/edited per
-  field. This is what makes the output "traceable and overridable"
-  rather than a black-box JSON blob.
+  field; `Lease.reviewed_by`/`decision_at` and
+  `WorkOrder.reviewed_by`/`decision_at` record who made the accept/
+  reject call and when; and `RuleCheck` rows are never deleted, only
+  superseded (`is_current`/`superseded_at`) — see
+  `app/services/lease_extraction.py:refresh_rule_checks` — so a field
+  edit's before/after effect on a rule result stays in the record
+  instead of being overwritten. This is what makes the output
+  "traceable and overridable" rather than a black-box JSON blob.
+- **A unit can have at most one accepted lease.** Enforced at the DB
+  layer with a partial unique index on `leases.unit_id` scoped to
+  `status = 'accepted'` (`app/db/models.py:Lease.__table_args__`), not
+  just application logic — a concurrent request can't double-book a
+  unit even if two review calls race.
+- **An uploaded issue photo is validated, hashed, and checked for
+  duplicates before anything else happens to it.**
+  `app/api/issues.py:_validate_photo_upload` rejects (400) anything over
+  10MB or that Pillow can't actually decode as an image — a client's
+  `Content-Type` header is never trusted on its own, since a renamed
+  `.txt` file can claim to be `image/jpeg` just as easily as a real
+  photo can. Past that gate, `IssuePhoto.sha256`/`size_bytes`/
+  `content_type` are recorded for every upload, and the file itself is
+  stored under its hash (`app/services/issue_reporting.py:_save_photo`)
+  rather than a request-derived name, so an identical photo uploaded
+  twice — same issue or a different one — is written to disk exactly
+  once. That re-upload is also flagged, not just deduped silently:
+  `IssuePhoto.duplicate_of_id` points at the original row (shown in the
+  frontend as a "Duplicate of #N" badge), always resolving to the
+  earliest upload with that hash even through a chain of re-uploads.
+  **Known simplification:** this is fully automatic — a duplicate is
+  stored and assessed exactly like any other photo, just flagged, never
+  blocked or confirmed. That's deliberate for now, since the same real
+  photo can honestly apply to more than one issue (e.g. the same visible
+  defect reported against two separate issues) and rejecting it outright
+  would be wrong. A reasonable future enhancement would be to surface
+  the duplicate at upload time and let the reporter confirm ("this is
+  the same photo as issue #4's — attach anyway?") rather than deciding
+  silently either way.
+- **A real model's JSON response is validated for shape, not just
+  parsed.** Both `app/ai/anthropic_lease_extractor.py` and
+  `app/ai/anthropic_image_assessor.py` (and their OpenAI counterparts)
+  already treated a response that isn't even valid JSON as "no usable
+  result" rather than crashing — what they didn't handle was valid JSON
+  in the *wrong* shape, e.g. `"contents": "AC unit"` instead of
+  `["AC unit"]`. Plain Python's `list("AC unit")` wouldn't raise there —
+  it would silently iterate the string into `["A", "C", " ", "u", ...]`.
+  All four implementations now validate the
+  parsed JSON against a shared Pydantic schema
+  (`app/ai/schemas.py:PhotoAssessmentPayload` /
+  `ExtractedFieldPayload`) and treat a validation failure exactly like a
+  parse failure — same fallback, not a crash and not silently-wrong
+  data. (Fixed the same pass: the real lease extractor's prompt never
+  asked for `unit_reference_text`, so unlike the mock extractor it could
+  never actually match a lease to a unit — see
+  `app/services/unit_matching.py`. Its prompt and field allowlist now
+  include it.)
+- **One photo's AI assessment failing doesn't fail the whole upload.**
+  `app/services/issue_reporting.py:_assess_photo` catches any exception
+  from the assessor per photo (a provider timeout, or a response the
+  schema above rejects) and records a clearly-labelled placeholder
+  (`IssuePhoto.processing_status = "failed"`) instead of losing every
+  other photo's real assessment — and the whole issue/work order along
+  with them — over one bad call. The real exception is logged
+  server-side, never surfaced to the caller. `IssuePhoto.original_filename`
+  is also now recorded (display only — storage stays content-addressed,
+  see above — so a human can tell photos apart by the name they
+  uploaded them under).
 - **The unit is the join key.** `GET /units/{unit_id}` already returns
   the unit with its lease(s) attached — designed so Part B's work orders
   slot into the same response without changing this shape, giving the
@@ -199,6 +318,8 @@ them is a one-line env var, not a rewrite.
 ```
 backend/
   app/                application code (ai/, services/, db/, api/, schemas/ — see above)
+  alembic/            migration environment + versions/ (see "Migrations" above)
+  alembic.ini
   data/               owner_ruleset.json, units.json, sample_lease.txt
   tests/              pytest suite (rule engine, both AI mocks, lease + issue review APIs)
   uploads/            issue photos land here at runtime, served at /uploads/<name>

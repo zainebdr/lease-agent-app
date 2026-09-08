@@ -7,9 +7,10 @@ headings, date formats, currency amounts) so it can extract from lease
 documents that follow a reasonably standard structure, and simply omits
 a field (rather than guessing) when it finds no confident match.
 
-Swapping this for app/ai/llm_lease_extractor.py (a real model call) does
-not require changing any code outside app/ai/factory.py, because both
-implement the same LeaseExtractor interface.
+Swapping this for app/ai/anthropic_lease_extractor.py or
+openai_lease_extractor.py (a real model call) does not require changing
+any code outside app/ai/factory.py, because both implement the same
+LeaseExtractor interface.
 """
 import re
 from datetime import datetime
@@ -139,6 +140,29 @@ class MockLeaseExtractor:
             fields["escalation_is_defined"] = ExtractedField(
                 is_defined and not defined_vague, f"line {idx+1}", 0.6
             )
+
+        # Not _find_line: a line can mention "renewal" only in passing
+        # while actually being about something else - e.g. an
+        # escalation clause phrased as "rent increases 5% upon renewal"
+        # is about the rent increase, not the renewal mechanism itself,
+        # and is already captured as escalation_clause_text above. This
+        # scans past a line like that to the next "renew" match instead
+        # of stopping at the first (possibly irrelevant) one.
+        for i, raw_line in enumerate(document_text.splitlines()):
+            if "renew" in raw_line.lower() and "escalation" not in raw_line.lower():
+                fields["renewal_terms_text"] = ExtractedField(raw_line.strip(), f"line {i+1}", 0.6)
+                break
+
+        found = _find_line(document_text, "terminat")
+        if found:
+            line, idx = found
+            # A line matching "terminat" is often just the end-date label
+            # ("Termination Date: 01/03/2026") rather than an actual
+            # termination *clause* (notice period, conditions, ...) - if
+            # this line parses as a bare date, it's the former, not
+            # something to report as termination terms.
+            if _extract_date_from_line(line) is None:
+                fields["termination_terms_text"] = ExtractedField(line, f"line {idx+1}", 0.6)
 
         signed_section = document_text.lower()
         fields["landlord_signed"] = ExtractedField(
