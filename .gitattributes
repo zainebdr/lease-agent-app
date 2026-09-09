@@ -1,0 +1,21 @@
+# Normalize line endings.
+#
+# Without this, checking the repo out on Windows and saving from an
+# editor that writes CRLF turned every tracked file into a "modified"
+# file: `git status` listed all 51 of them and `git diff` reported
+# 5,546 insertions and 5,546 deletions - every line of the project -
+# purely because the endings changed. A diff nobody can read is a diff
+# nobody reviews.
+#
+# text=auto eol=lf: store LF in the repository, check out LF everywhere.
+# Every tool in this project (Python, pytest, browsers) is fine with LF
+# on Windows.
+* text=auto eol=lf
+
+# Binary files must never be touched by the above.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.pdf binary
+*.db binary

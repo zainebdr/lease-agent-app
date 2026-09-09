@@ -3,5 +3,15 @@ __pycache__/
 venv/
 .env
 app.db
-uploads/*
-!uploads/.gitkeep
+.pytest_cache/
+
+# Uploaded issue photos are runtime data, not source. Note the path:
+# a pattern containing a slash is anchored to this file's directory, so
+# a bare "uploads/*" here never matched backend/uploads/ at all - which
+# is why those files kept showing up as untracked.
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Working notes from the review pass - not part of the submission.
+ARCHITECTURE_REVIEW.md
+REVIEW_2026-09-09.md
