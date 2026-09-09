@@ -185,7 +185,15 @@
 </main>
 
 <script>
-const API_BASE = "http://localhost:8000";
+// Empty means "same origin as this page" - the backend serves this file
+// itself (app/main.py mounts frontend/ at "/"), so every call below is a
+// relative URL to the very server the page came from. That is what keeps
+// the whole thing one command and no CORS configuration, and it means
+// the page works unchanged on any host or port. Point it at an absolute
+// URL (e.g. "http://localhost:8000") only if you are serving this file
+// separately - and then set CORS_ORIGINS on the backend to this page's
+// own origin.
+const API_BASE = "";
 
 // ---------------------------------------------------------------------
 // View switching - deliberately no router/framework: three sections,
@@ -464,7 +472,7 @@ function renderLeaseFieldRow(lease, key, isDraft, editing) {
     valueHtml = `
       ${escapeHtml(value === null || value === undefined ? "—" : String(value))}
       <div class="field-meta">
-        ${ef.source_span ? `source: ${escapeHtml(ef.source_span)} &middot; ` : ""}${ef.confidence != null ? `confidence ${Number(ef.confidence).toFixed(2)} &middot; ` : ""}${reviewBadge(reviewState)}
+        ${ef.source_span ? `source: ${escapeHtml(ef.source_span)} &middot; ` : ""}${ef.confidence != null ? `confidence ${Number(ef.confidence).toFixed(2)}${ef.extracted_by ? ` (${escapeHtml(ef.extracted_by)})` : ""} &middot; ` : ""}${reviewBadge(reviewState)}
       </div>`;
   }
 
@@ -531,6 +539,7 @@ function renderLeaseCard(lease) {
         ${pendingCount > 0 ? `<div class="field-meta" style="margin-top:6px;">${pendingCount} field(s) still pending - accept, reject, or edit them (or use "Accept all pending") before you can finalize.</div>` : ""}
       ` : `
         ${lease.reviewed_by ? `<div class="field-meta" style="margin-top:6px;">Decided by ${escapeHtml(lease.reviewed_by)}${lease.decision_at ? ` on ${escapeHtml(new Date(lease.decision_at).toLocaleString())}` : ""}</div>` : ""}
+        ${lease.high_severity_override_reason ? `<div class="field-meta" style="margin-top:6px;"><strong>Accepted over ${escapeHtml((lease.high_severity_overridden_rules || []).join(", "))}</strong> - ${escapeHtml(lease.high_severity_override_reason)}</div>` : ""}
       `}
     </div>
   `;
@@ -731,6 +740,26 @@ document.addEventListener("click", async (e) => {
     const reviewedBy = requireReviewerName();
     if (!reviewedBy) return;
     payload = { field_actions: [], finalize: true, reviewed_by: reviewedBy };
+    // The API refuses to accept a lease while a severity "high" rule is
+    // FAILing (409), unless the reviewer states a reason - which is then
+    // recorded on the lease. Asking here, before the call, means the
+    // reviewer sees *which* rules are failing while deciding, instead of
+    // discovering it from a rejected round trip. The server enforces
+    // this regardless of what the page does; this is only the prompt.
+    const blocking = (lease.rule_checks || []).filter(
+      rc => rc.severity === "high" && rc.result === "FAIL"
+    );
+    if (blocking.length) {
+      const summary = blocking.map(rc => `${rc.rule_id}: ${rc.reason}`).join("\n");
+      const reason = window.prompt(
+        `${blocking.length} high-severity rule check(s) are failing:\n\n${summary}\n\n` +
+        `Cancel to go back and fix the fields (or reject the lease). ` +
+        `To accept it anyway, state why - this is recorded on the lease (min 10 characters).`,
+        ""
+      );
+      if (reason === null) return;
+      payload.override_reason = reason;
+    }
   } else if (action === "accept-all") {
     const pendingFields = Object.entries(lease.review_status)
       .filter(([, state]) => state === "pending")

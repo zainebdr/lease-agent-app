@@ -20,6 +20,8 @@ import json
 from pydantic import ValidationError
 
 from app.ai.base import ExtractedField
+
+_MODEL = "claude-sonnet-4-6"
 from app.ai.schemas import ExtractedFieldPayload
 from app.config import ANTHROPIC_API_KEY
 
@@ -88,7 +90,7 @@ class AnthropicLeaseExtractor:
 
     def extract(self, document_text: str) -> dict[str, ExtractedField]:
         response = self._client.messages.create(
-            model="claude-sonnet-4-6",
+            model=_MODEL,
             max_tokens=1500,
             messages=[
                 {"role": "user", "content": EXTRACTION_PROMPT.format(document_text=document_text)}
@@ -121,5 +123,9 @@ class AnthropicLeaseExtractor:
                 value=payload.value,
                 source_span=payload.source_span,
                 confidence=payload.confidence,
+                # A confidence this model reported about itself reads
+                # very differently from the mock's label-match score -
+                # see ExtractedField's docstring.
+                extracted_by=f"anthropic:{_MODEL}",
             )
         return fields

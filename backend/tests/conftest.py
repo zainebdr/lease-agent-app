@@ -22,6 +22,25 @@ from sqlalchemy.pool import StaticPool
 
 from app.db.base import Base, get_db
 from app.db.seed import seed_units
+from app.services import issue_reporting
+
+
+@pytest.fixture(autouse=True)
+def isolated_upload_dir(tmp_path, monkeypatch):
+    """Every test writes uploaded photos into its own temp directory.
+
+    The suite isolated the database from the start but not the
+    filesystem, so `pytest` wrote real image files into backend/uploads/
+    on every run - a test suite quietly leaving artefacts in the
+    repository it is testing. issue_reporting binds UPLOAD_DIR at import
+    time (`from app.config import UPLOAD_DIR`), so patching the module's
+    own reference is what actually redirects the writes; patching
+    app.config alone would not.
+    """
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    monkeypatch.setattr(issue_reporting, "UPLOAD_DIR", upload_dir)
+    return upload_dir
 
 
 @pytest.fixture()

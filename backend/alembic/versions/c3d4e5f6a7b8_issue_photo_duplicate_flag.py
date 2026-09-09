@@ -26,15 +26,23 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        "issue_photos",
-        sa.Column(
-            "duplicate_of_id",
-            sa.Integer(),
-            sa.ForeignKey("issue_photos.id"),
-            nullable=True,
-        ),
-    )
+    # batch_alter_table, not a plain add_column: this column carries a
+    # FOREIGN KEY, and SQLite cannot ALTER TABLE ADD a constrained
+    # column - a plain op.add_column here raises
+    #   NotImplementedError: No support for ALTER of constraints in
+    #   SQLite dialect
+    # and leaves the database stranded on the previous revision. Batch
+    # mode does the copy-and-move rebuild SQLite needs; on Postgres,
+    # where a plain ALTER would have worked, this compiles to the same
+    # ALTER, so one code path is correct on both.
+    with op.batch_alter_table("issue_photos") as batch_op:
+        batch_op.add_column(sa.Column("duplicate_of_id", sa.Integer(), nullable=True))
+        batch_op.create_foreign_key(
+            "fk_issue_photos_duplicate_of_id",
+            "issue_photos",
+            ["duplicate_of_id"],
+            ["id"],
+        )
     op.create_index(
         "ix_issue_photos_duplicate_of_id", "issue_photos", ["duplicate_of_id"]
     )
@@ -42,4 +50,6 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index("ix_issue_photos_duplicate_of_id", table_name="issue_photos")
-    op.drop_column("issue_photos", "duplicate_of_id")
+    with op.batch_alter_table("issue_photos") as batch_op:
+        batch_op.drop_constraint("fk_issue_photos_duplicate_of_id", type_="foreignkey")
+        batch_op.drop_column("duplicate_of_id")

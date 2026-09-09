@@ -146,6 +146,17 @@ class Lease(Base, TimestampMixin):
     reviewed_by = Column(String, nullable=True)
     decision_at = Column(DateTime, nullable=True)
 
+    # A lease cannot be accepted while a severity="high" rule is FAILing
+    # (app/api/leases.py) - but a human with authority sometimes has a
+    # legitimate reason to accept one anyway. That is a decision worth
+    # auditing, not a check worth skipping, so the override is explicit:
+    # the reviewer must state a reason, and both the reason and exactly
+    # which rules were overridden are recorded on the lease. NULL means
+    # no override was needed (or the lease isn't accepted); it never
+    # means "overridden silently".
+    high_severity_override_reason = Column(String, nullable=True)
+    high_severity_overridden_rules = Column(JSON, nullable=True)  # ["R1", "R5"]
+
     unit = relationship("Unit", back_populates="leases")
 
     # Full history of every RuleCheck row ever produced for this lease,

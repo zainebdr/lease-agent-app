@@ -5,7 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.db.base import get_db
-from app.db.enums import LeaseStatus, ReviewState, UnitStatus
+from app.db.enums import LeaseStatus, ReviewState, RuleResult, UnitStatus
 from app.db.models import Lease, Unit
 from app.schemas.lease import LeaseOut, LeaseReviewRequest
 from app.services import lease_extraction
@@ -65,6 +65,57 @@ def _require_reviewer(review: LeaseReviewRequest) -> str:
             "decision must be recorded.",
         )
     return review.reviewed_by
+
+
+# A rule at this severity failing is the ruleset saying "do not accept
+# this lease". The value is the one used in data/owner_ruleset.json.
+BLOCKING_SEVERITY = "high"
+
+
+def _high_severity_failures(rule_results: list[dict]) -> list[dict]:
+    return [
+        r for r in rule_results
+        if r["severity"] == BLOCKING_SEVERITY and r["result"] == RuleResult.FAIL
+    ]
+
+
+def _apply_high_severity_gate(lease: Lease, rule_results: list[dict], review: LeaseReviewRequest) -> None:
+    """Refuses to accept a lease that a high-severity rule is FAILing,
+    unless the reviewer explicitly overrides with a stated reason.
+
+    Before this existed, `severity` was loaded from the ruleset, stored
+    on every RuleCheck row and rendered in the UI - and read by no
+    decision anywhere, so a lease whose deposit was a hundredth of its
+    rent (R1, severity high, FAIL) could be finalized to "accepted" with
+    a plain 200. The ruleset was decorative. This is the one place that
+    makes it binding.
+
+    An override is allowed rather than a hard block, but it is never
+    silent: the reason and the exact rule ids overridden are written to
+    the lease, so "accepted despite R1" stays visible in the record
+    instead of being indistinguishable from "accepted cleanly".
+    """
+    failures = _high_severity_failures(rule_results)
+    if not failures:
+        return
+
+    summary = "; ".join(f"{f['rule_id']}: {f['reason']}" for f in failures)
+    reason = (review.override_reason or "").strip()
+    if not reason:
+        raise HTTPException(
+            409,
+            f"Cannot accept: {len(failures)} high-severity rule check(s) are failing "
+            f"[{summary}]. Fix the underlying fields, reject the lease, or supply "
+            "'override_reason' to accept it anyway - the reason is recorded on the lease.",
+        )
+    if len(reason) < 10:
+        raise HTTPException(
+            400,
+            "'override_reason' must actually explain the override "
+            "(at least 10 characters).",
+        )
+    lease.high_severity_override_reason = reason
+    lease.high_severity_overridden_rules = [f["rule_id"] for f in failures]
 
 
 @router.post("/upload", response_model=LeaseOut)
@@ -149,7 +200,7 @@ def review_lease(lease_id: int, review: LeaseReviewRequest, db: Session = Depend
     # overwrote, which defeats the point of a checkable record. Always
     # refreshed, not just when an edit happened, so this stays correct
     # without tracking "did anything actually change" separately.
-    lease_extraction.refresh_rule_checks(db, lease)
+    rule_results = lease_extraction.refresh_rule_checks(db, lease)
 
     if review.finalize:
         if ReviewState.REJECTED.value in review_status.values():
@@ -167,6 +218,10 @@ def review_lease(lease_id: int, review: LeaseReviewRequest, db: Session = Depend
             )
         else:
             _reject_if_unit_already_leased(db, lease)
+            # Ordered deliberately: the unit conflict and the failing-rule
+            # gate both reject the acceptance, and both must run before
+            # anything is mutated toward "accepted".
+            _apply_high_severity_gate(lease, rule_results, review)
             lease.status = LeaseStatus.ACCEPTED
             lease.reviewed_by = _require_reviewer(review)
             lease.decision_at = _utcnow()

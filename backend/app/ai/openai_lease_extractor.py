@@ -63,5 +63,6 @@ class OpenAILeaseExtractor:
                 value=payload.value,
                 source_span=payload.source_span,
                 confidence=payload.confidence,
+                extracted_by=f"openai:{_MODEL}",
             )
         return fields

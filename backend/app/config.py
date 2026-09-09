@@ -58,6 +58,28 @@ USE_REAL_LLM = AI_PROVIDER is not None  # convenience flag for call sites
 RULESET_PATH = DATA_DIR / "owner_ruleset.json"
 UNITS_SEED_PATH = DATA_DIR / "units.json"
 
+# --- Frontend + CORS ------------------------------------------------------
+# The frontend is one dependency-free HTML file, and this app serves it
+# itself at "/" - so the page and the API live at the same origin and
+# nothing about the normal path is cross-origin. That is the whole
+# reason there is no CORS wildcard here any more: an API with no
+# authentication and allow_origins=["*"] lets any site the user happens
+# to have open read from, and POST to, this app on localhost. Nothing
+# needs that permission once the page is served from the same place the
+# API is.
+#
+# Serving static assets from the API process is a deliberate trade, not
+# an oversight: it is right for one file and no build step, and wrong
+# once there is a bundler or real traffic, because page requests then
+# compete with API requests for workers and nothing can be cached at a
+# CDN. CORS_ORIGINS is the exit - move index.html behind nginx/CloudFront,
+# set CORS_ORIGINS to that domain, delete the mount in app/main.py.
+# It is also what a developer sets to run the page on its own port:
+#   CORS_ORIGINS=http://localhost:5500
+# Empty (the default) means the middleware is never even added.
+FRONTEND_DIR = BASE_DIR.parent / "frontend"
+CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+
 # --- Uploads ----------------------------------------------------------
 UPLOAD_DIR = BASE_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)

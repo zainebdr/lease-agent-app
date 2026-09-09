@@ -76,7 +76,7 @@ def rule_engine_row(lease_id: int, result: dict):
     return RuleCheck(lease_id=lease_id, **result)
 
 
-def refresh_rule_checks(db: Session, lease: Lease) -> None:
+def refresh_rule_checks(db: Session, lease: Lease) -> list[dict]:
     """Re-run the rule engine against whatever the lease's fields hold
     right now, and record the fresh result alongside - not in place of -
     whatever was there before.
@@ -84,6 +84,12 @@ def refresh_rule_checks(db: Session, lease: Lease) -> None:
     Called after every review action that can change a lease's field
     values (an "edit"), so a displayed PASS/FAIL always describes the
     lease as it currently stands, not a stale extraction-time snapshot.
+    Returns the fresh results as well as persisting them, so a caller
+    deciding whether the lease may now be accepted (app/api/leases.py's
+    high-severity finalize gate) reads them straight from this run
+    instead of re-querying rows it just added to a session that hasn't
+    flushed yet.
+
     Deliberately unconditional (always refreshes, not just "if
     something changed") - that keeps this correct without the caller
     having to track edit state separately, and re-running 7 in-memory
@@ -103,5 +109,7 @@ def refresh_rule_checks(db: Session, lease: Lease) -> None:
         if existing.is_current:
             existing.is_current = False
             existing.superseded_at = now
-    for result in rule_engine.run_all_checks(lease, unit):
+    results = rule_engine.run_all_checks(lease, unit)
+    for result in results:
         db.add(rule_engine_row(lease.id, result))
+    return results

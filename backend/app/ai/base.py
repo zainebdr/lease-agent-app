@@ -8,18 +8,46 @@ from typing import Protocol, Any
 
 
 class ExtractedField:
-    """A single extracted value with provenance and a confidence score."""
+    """A single extracted value with provenance and a confidence score.
 
-    def __init__(self, value: Any, source_span: str | None, confidence: float):
+    `extracted_by` names what produced the value - "mock-labels", or the
+    real model id - for the same reason IssuePhoto.assessed_by exists on
+    the Part B side: without it, a stored confidence is uninterpretable.
+    0.65 from the label-matching mock is a *measurement* (the label
+    matched weakly - go read that line), while 0.65 from a model is the
+    model's own opinion of itself, which is not calibrated against
+    anything. Same number, same column, different meaning and a
+    different action for the human reviewing it - so the record has to
+    say which one it is.
+
+    Note that neither the brief nor owner_ruleset.json asks for
+    confidence at all; it exists to answer "which of these fields should
+    a human look at first", which the brief does ask for ("flag ...
+    values that look wrong"). It deliberately never gates a decision -
+    a machine's estimate of its own reliability is the last thing that
+    should be allowed to overrule a human. Contrast RuleCheck.severity,
+    which is the *owner's* policy and does block acceptance
+    (app/api/leases.py:_apply_high_severity_gate).
+    """
+
+    def __init__(
+        self,
+        value: Any,
+        source_span: str | None,
+        confidence: float,
+        extracted_by: str = "unknown",
+    ):
         self.value = value
         self.source_span = source_span
         self.confidence = confidence
+        self.extracted_by = extracted_by
 
     def to_dict(self) -> dict:
         return {
             "value": self.value,
             "source_span": self.source_span,
             "confidence": self.confidence,
+            "extracted_by": self.extracted_by,
         }
 
 

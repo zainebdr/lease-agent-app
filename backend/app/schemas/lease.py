@@ -55,6 +55,11 @@ class LeaseOut(BaseModel):
     reviewed_by: Optional[str] = None
     decision_at: Optional[datetime] = None
 
+    # Set only when this lease was accepted over a FAILing high-severity
+    # rule - see app/db/models.py:Lease.high_severity_override_reason.
+    high_severity_override_reason: Optional[str] = None
+    high_severity_overridden_rules: Optional[list[str]] = None
+
     rule_checks: list[RuleCheckOut] = []
     # Every rule-check row this lease has ever had, including ones a
     # later edit superseded - `rule_checks` above only ever shows the
@@ -169,3 +174,14 @@ class LeaseReviewRequest(BaseModel):
     # plain per-field accept/reject/edit that doesn't finalize, since
     # nothing has been decided yet at that point.
     reviewed_by: Optional[str] = None
+    # Required only to finalize an *acceptance* over a FAILing
+    # high-severity rule. Without it that finalize is refused with a 409
+    # naming the failing rules; with it, the lease is accepted and both
+    # the reason and the overridden rule ids are recorded on the lease
+    # (app/db/models.py:Lease.high_severity_override_reason).
+    # Deliberately an explicit, recorded override rather than a hard
+    # block: an owner accepting a lease whose deposit is short by prior
+    # agreement is a real business case, and a system that simply
+    # refuses gets worked around outside the system, where nothing is
+    # audited at all.
+    override_reason: Optional[str] = None

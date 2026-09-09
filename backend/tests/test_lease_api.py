@@ -38,12 +38,20 @@ def test_upload_extracts_fields_matches_unit_and_runs_all_rule_checks(client):
     assert all(v == "pending" for v in lease["review_status"].values())
 
     # Sample lease is internally consistent, so every determinable rule
-    # should pass: deposit == rent (R1), escalation has a % (R2), 12mo
-    # term (R3), dates match the stated term (R4), both parties named
-    # and "signed" (R5, presence-based per the mock extractor), annual
-    # == monthly x 12 (R6), and the unit exists and is available (R7).
-    for rule_id in ["R1", "R2", "R3", "R4", "R5", "R6", "R7"]:
+    # passes: deposit == rent (R1), escalation has a % (R2), 12mo term
+    # (R3), dates match the stated term (R4), annual == monthly x 12
+    # (R6), and the unit exists and is available (R7).
+    for rule_id in ["R1", "R2", "R3", "R4", "R6", "R7"]:
         assert _rule_result(lease, rule_id) == "PASS", rule_id
+
+    # R5 is the one that is NOT determinable, and that is the correct
+    # answer rather than a weaker one: the sample lease's signature
+    # lines are blank ("Landlord Signature: ____"), and plain text
+    # cannot show whether they were signed. This used to report PASS,
+    # because signatures were a whole-document keyword check that could
+    # never say "unknown" - see
+    # tests/test_mock_lease_extractor.py:test_blank_signature_lines_are_unknown_not_signed.
+    assert _rule_result(lease, "R5") == "NOT_DETERMINABLE"
 
 
 def test_accept_all_then_finalize_accepts_lease_and_occupies_unit(client):
